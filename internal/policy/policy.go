@@ -185,22 +185,12 @@ func cleanedSet(files []string) map[string]bool {
 	return set
 }
 
-func validRepoPath(p string) bool {
-	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") {
-		return false
-	}
-	if strings.ContainsAny(p, "\\\x00") {
-		return false
-	}
-	return path.Clean(p) == p
-}
-
 func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool) []Reason {
-	if !validRepoPath(f.Path) {
+	if checkRepoPath(f.Path) != nil {
 		return []Reason{{
 			Rule:    RuleInvalidPath,
 			File:    f.Path,
-			Message: fmt.Sprintf("the diff contains the path %q, which is not a clean repo-relative path", f.Path),
+			Message: fmt.Sprintf("the diff contains the path %q, which is not a clean repo-relative path", clip(f.Path)),
 		}}
 	}
 
@@ -208,7 +198,7 @@ func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool)
 		return []Reason{{
 			Rule:    RuleInvalidDiff,
 			File:    f.Path,
-			Message: fmt.Sprintf("the diff entry for %s is malformed: %s", f.Path, problem),
+			Message: fmt.Sprintf("the diff entry for %q is malformed: %s", f.Path, problem),
 		}}
 	}
 
@@ -221,7 +211,7 @@ func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool)
 		reasons = append(reasons, Reason{
 			Rule:    RuleProtectedFile,
 			File:    f.Path,
-			Message: fmt.Sprintf("%s is %s (matches %q) and cannot be changed", f.Path, source, pattern),
+			Message: fmt.Sprintf("%q is %s (matches %q) and cannot be changed", f.Path, source, pattern),
 		})
 	}
 	if rules.EditScope == ScopeFilesInErrors && !named[f.Path] {
@@ -230,13 +220,13 @@ func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool)
 	if f.Binary {
 		reasons = append(reasons, Reason{
 			Rule: RuleBinaryFile, File: f.Path,
-			Message: fmt.Sprintf("%s is a binary change, which is not allowed", f.Path),
+			Message: fmt.Sprintf("%q is a binary change, which is not allowed", f.Path),
 		})
 	}
 	if f.Special != "" {
 		reasons = append(reasons, Reason{
 			Rule: RuleSpecialFile, File: f.Path,
-			Message: fmt.Sprintf("%s is a %s change, which is not allowed", f.Path, f.Special),
+			Message: fmt.Sprintf("%q is a %s change, which is not allowed", f.Path, f.Special),
 		})
 	}
 	return append(reasons, forbiddenReasons(f, rules.ForbiddenPatterns)...)
@@ -265,14 +255,17 @@ func diffProblem(f FileChange, duplicate bool) string {
 
 func editScopeMessage(p string, named map[string]bool) string {
 	if len(named) == 0 {
-		return fmt.Sprintf("%s is not named in the errors; no files are named in the errors", p)
+		return fmt.Sprintf("%q is not named in the errors; no files are named in the errors", p)
 	}
 	files := make([]string, 0, len(named))
 	for f := range named {
 		files = append(files, f)
 	}
 	slices.Sort(files)
-	return fmt.Sprintf("%s is not named in the errors; only these files may be edited: %s", p, strings.Join(files, ", "))
+	for i, f := range files {
+		files[i] = fmt.Sprintf("%q", clip(f))
+	}
+	return fmt.Sprintf("%q is not named in the errors; only these files may be edited: %s", p, strings.Join(files, ", "))
 }
 
 func forbiddenReasons(f FileChange, patterns []string) []Reason {

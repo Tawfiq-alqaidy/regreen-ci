@@ -144,12 +144,6 @@ func TestParseUnifiedDiff(t *testing.T) {
 			want:  Diff{Files: []FileChange{{Path: "dir sp/a b.sh", Kind: Modified, Special: "mode change"}}},
 		},
 		{
-			name: "quoted tab path",
-			patch: "diff --git \"a/tab\\there.txt\" \"b/tab\\there.txt\"\nindex 1111111..2222222 100644\n" +
-				"--- \"a/tab\\there.txt\"\n+++ \"b/tab\\there.txt\"\n@@ -1 +1,2 @@\n t\n+z\n",
-			want: Diff{Files: []FileChange{{Path: "tab\there.txt", Kind: Modified, Added: []Line{{2, "z"}}}}},
-		},
-		{
 			name: "quoted octal path",
 			patch: "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n" +
 				"--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1,2 @@\n c\n+z\n",
@@ -160,11 +154,6 @@ func TestParseUnifiedDiff(t *testing.T) {
 			patch: "diff --git \"a/q \\\"s.txt\" \"b/q \\\"s.txt\"\nindex 1111111..2222222 100644\n" +
 				"--- \"a/q \\\"s.txt\"\t\n+++ \"b/q \\\"s.txt\"\t\n@@ -1 +1,2 @@\n y\n+z\n",
 			want: Diff{Files: []FileChange{{Path: "q \"s.txt", Kind: Modified, Added: []Line{{2, "z"}}}}},
-		},
-		{
-			name:  "quoted mode-only path",
-			patch: "diff --git \"a/tab\\tx.sh\" \"b/tab\\tx.sh\"\nold mode 100644\nnew mode 100755\n",
-			want:  Diff{Files: []FileChange{{Path: "tab\tx.sh", Kind: Modified, Special: "mode change"}}},
 		},
 		{
 			name: "added lines that look like headers",
@@ -290,6 +279,19 @@ func TestParseUnifiedDiffErrors(t *testing.T) {
 		{"quoted NUL", "diff --git \"a/x\\000\" \"b/x\\000\"\n"},
 		{"quoted backslash path", "diff --git \"a/x\\\\y\" \"b/x\\\\y\"\n"},
 		{"unquoted name without prefix on one side", "diff --git \"a/x\" x\n"},
+		// Git C-quotes names with control characters; they are rejected after
+		// decoding so they cannot reach a Reason.Message or a log line.
+		{
+			"quoted tab path",
+			"diff --git \"a/tab\\there.txt\" \"b/tab\\there.txt\"\nindex 1111111..2222222 100644\n" +
+				"--- \"a/tab\\there.txt\"\n+++ \"b/tab\\there.txt\"\n@@ -1 +1,2 @@\n t\n+z\n",
+		},
+		{"quoted mode-only tab path", "diff --git \"a/tab\\tx.sh\" \"b/tab\\tx.sh\"\nold mode 100644\nnew mode 100755\n"},
+		{"quoted newline path", "diff --git \"a/x\\ny\" \"b/x\\ny\"\nold mode 100644\nnew mode 100755\n"},
+		{"quoted escape sequence path", "diff --git \"a/x\\033[2Ky\" \"b/x\\033[2Ky\"\nold mode 100644\nnew mode 100755\n"},
+		{"quoted DEL path", "diff --git \"a/x\\177\" \"b/x\\177\"\nold mode 100644\nnew mode 100755\n"},
+		{"quoted invalid UTF-8 path", "diff --git \"a/caf\\351\" \"b/caf\\351\"\nold mode 100644\nnew mode 100755\n"},
+		{"raw escape in unquoted path", "diff --git a/x\x1by b/x\x1by\nold mode 100644\nnew mode 100755\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

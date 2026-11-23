@@ -64,7 +64,7 @@ func TestEvaluate(t *testing.T) {
 				if v.Reasons[0].File != "src/b.ts" {
 					t.Errorf("File = %q", v.Reasons[0].File)
 				}
-				want := "src/b.ts is not named in the errors; only these files may be edited: src/a.ts"
+				want := `"src/b.ts" is not named in the errors; only these files may be edited: "src/a.ts"`
 				if v.Reasons[0].Message != want {
 					t.Errorf("Message = %q, want %q", v.Reasons[0].Message, want)
 				}
@@ -107,7 +107,7 @@ func TestEvaluate(t *testing.T) {
 			wantRules: []string{RuleEditScope}, wantRemaining: 2,
 			check: func(t *testing.T, v Verdict) {
 				t.Helper()
-				if !strings.HasSuffix(v.Reasons[0].Message, "src/a.ts, src/b.ts") {
+				if !strings.HasSuffix(v.Reasons[0].Message, `"src/a.ts", "src/b.ts"`) {
 					t.Errorf("Message = %q", v.Reasons[0].Message)
 				}
 			},
@@ -402,6 +402,12 @@ func TestEvaluateInvalidPath(t *testing.T) {
 		{"backslash", `src\a.ts`},
 		{"NUL byte", "src/a\x00.ts"},
 		{"not clean", "src//a.ts"},
+		{"newline", "src/a.ts\nok: all checks passed"},
+		{"escape sequence", "src/\x1b[32ma.ts"},
+		{"DEL", "src/a\x7f.ts"},
+		{"invalid UTF-8", "src/caf\xe9.ts"},
+		{"too long", "src/" + strings.Repeat("x", 4096)},
+		{"too many segments", strings.Repeat("d/", 255) + "a.ts"},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
@@ -508,6 +514,83 @@ func TestEvaluateMessagesAreOneSentence(t *testing.T) {
 	}
 }
 
+// TestEvaluateMessagesQuoteHostileText feeds agent-controlled paths, error
+// file names and patterns with control characters, and checks that no
+// control character reaches a message: a raw newline or ESC could forge CI
+// log lines.
+func TestEvaluateMessagesQuoteHostileText(t *testing.T) {
+	const hostile = "a\n::error::forged\x1b[2K\r\x7f"
+	tests := []struct {
+		name string
+		in   Input
+	}{
+		{"invalid path", Input{
+			Diff:  Diff{Files: []FileChange{mod("src/"+hostile, 0, "x")}},
+			Rules: DefaultRules(),
+		}},
+		{"hostile error file in edit scope message", Input{
+			Diff:       Diff{Files: []FileChange{mod("src/b.ts", 0, "x")}},
+			Rules:      DefaultRules(),
+			ErrorFiles: []string{"src/" + hostile},
+		}},
+		{"hostile forbidden pattern", Input{
+			Diff:       Diff{Files: []FileChange{mod("src/a.ts", 0, "x\x1b[2K\r\x7fy")}},
+			Rules:      rulesWith(func(r *Rules) { r.ForbiddenPatterns = []string{"\x1b[2K\r\x7f"} }),
+			ErrorFiles: []string{"src/a.ts"},
+		}},
+		{"hostile protected pattern", Input{
+			Diff:  Diff{Files: []FileChange{mod("src/a.ts", 0, "x")}},
+			Rules: rulesWith(func(r *Rules) { r.ProtectedFiles = []string{"\x1b[2K"} }),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := Evaluate(tt.in)
+			if v.Allowed {
+				t.Fatal("allowed")
+			}
+			for _, r := range v.Reasons {
+				for i := 0; i < len(r.Message); i++ {
+					if c := r.Message[i]; c < 0x20 || c == 0x7f {
+						t.Errorf("%s message contains control byte %#x: %q", r.Rule, c, r.Message)
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluateMessagesQuotePaths(t *testing.T) {
+	in := Input{
+		Diff: Diff{Files: []FileChange{
+			mod("regreen.yml", 0, "x"),
+			{Path: "b.bin", Binary: true},
+			{Path: "l", Special: "symlink"},
+		}},
+		Rules:      DefaultRules(),
+		ErrorFiles: []string{"regreen.yml", "b.bin", "l"},
+	}
+	want := []string{
+		`"regreen.yml" is always protected (matches "regreen.yml") and cannot be changed`,
+		`"b.bin" is a binary change, which is not allowed`,
+		`"l" is a symlink change, which is not allowed`,
+	}
+	var got []string
+	for _, r := range Evaluate(in).Reasons {
+		got = append(got, r.Message)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("messages =\n%q\nwant\n%q", got, want)
+	}
+
+	dup := Evaluate(Input{Diff: Diff{Files: []FileChange{mod("a.ts", 0, "x"), mod("a.ts", 0, "x")}},
+		Rules: rulesWith(func(r *Rules) { r.EditScope = ScopeAny })})
+	if len(dup.Reasons) != 1 || !strings.HasPrefix(dup.Reasons[0].Message, `the diff entry for "a.ts" is malformed`) {
+		t.Errorf("invalid_diff reasons = %+v", dup.Reasons)
+	}
+}
+
 func TestEvaluateRejectsUnreadableProtectedPatterns(t *testing.T) {
 	for _, pattern := range []string{"src//secret.ts", "secret[.ts", "!regreen.yml"} {
 		t.Run(pattern, func(t *testing.T) {
@@ -584,7 +667,7 @@ func TestEvaluateInvalidDiff(t *testing.T) {
 func TestEvaluateIgnoresBlankErrorFiles(t *testing.T) {
 	in := Input{Diff: Diff{Files: []FileChange{mod("b.ts", 0, "x")}}, Rules: DefaultRules(), ErrorFiles: []string{"", "  ", "a.ts"}}
 	v := Evaluate(in)
-	if got := v.Reasons[0].Message; !strings.HasSuffix(got, "may be edited: a.ts") {
+	if got := v.Reasons[0].Message; !strings.HasSuffix(got, `may be edited: "a.ts"`) {
 		t.Errorf("Message = %q", got)
 	}
 	in.ErrorFiles = []string{"", " "}

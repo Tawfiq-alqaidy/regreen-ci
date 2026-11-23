@@ -2,7 +2,6 @@ package policy
 
 import (
 	"fmt"
-	"path"
 	"strconv"
 	"strings"
 )
@@ -320,7 +319,7 @@ func (p *parser) resolve(start int, gitPath string, h fileHeader) (FileChange, e
 			return fc, p.errf(start, "path %q on the diff --git line does not match %q", clip(gitPath), clip(fc.Path))
 		}
 	}
-	if err := validPath(fc.Path); err != nil {
+	if err := checkRepoPath(fc.Path); err != nil {
 		return fc, p.errf(start, "%v", err)
 	}
 	return fc, nil
@@ -379,22 +378,6 @@ func special(h fileHeader) string {
 		}
 	}
 	return result
-}
-
-func validPath(s string) error {
-	switch {
-	case s == "":
-		return fmt.Errorf("empty path")
-	case strings.HasPrefix(s, "/"):
-		return fmt.Errorf("absolute path %q", clip(s))
-	case strings.ContainsRune(s, 0):
-		return fmt.Errorf("path %q contains a NUL byte", clip(s))
-	case strings.Contains(s, `\`):
-		return fmt.Errorf("path %q contains a backslash", clip(s))
-	case s == "." || s == ".." || strings.HasPrefix(s, "../") || s != path.Clean(s):
-		return fmt.Errorf("path %q is not a clean repo-relative path", clip(s))
-	}
-	return nil
 }
 
 // splitGitLine recovers the path from the text after "diff --git ". With
