@@ -33,6 +33,7 @@ Nothing calls these two packages from the command line yet. They are libraries w
 internal/policy/        pure policy engine; standard library only, no I/O
   diff.go       Diff, FileChange, Line, ChangeKind: the model of a patch
   glob.go       the gitignore-style pattern matcher: ValidatePattern, MatchPath
+  paths.go      checkRepoPath: the one path check the parser and Evaluate share
   protected.go  the always-protected path list; IsProtected, AlwaysProtected
   parse.go      ParseUnifiedDiff: patch text from git -> Diff, failing closed
   policy.go     Rules, Input, Verdict, Reason, the Rule* names; Evaluate
@@ -42,7 +43,11 @@ internal/config/        reads files and turns them into policy.Rules
   user.go       LoadUser, UserConfigPath: the per-user config file
 ```
 
-`internal/policy` may import only the standard library. A test (`TestPolicyPackageIsPure`) reads the imports of every non-test file and fails if one of them is a third-party package, a package of this module, or a package that does I/O (`os`, `os/exec`, `io/fs`, `net`, `time` and similar). `internal/config` imports `internal/policy`, never the other way round.
+`internal/policy` may import only the standard library. A test (`TestPolicyPackageIsPure`) reads the imports of every non-test file and fails if one of them is not on an allowlist of the exact standard-library packages the engine uses today (`errors`, `fmt`, `path`, `slices`, `strconv`, `strings`, `unicode/utf8`). A new import, even from the standard library, has to be added to that list on purpose. `internal/config` imports `internal/policy`, never the other way round.
+
+`MatchPath` compares pattern segments with path segments by dynamic programming: one row of a table per pattern segment, one column per path segment, so a match costs at most (pattern segments) x (path segments) segment comparisons however many `**` the pattern has. Runs of `**` are collapsed first. The last row answers "does the pattern match the whole path or any leading directory of it" for every prefix length at once.
+
+Paths are checked by one function, `checkRepoPath`, called by both the parser and `Evaluate`. Besides absolute paths, `..`, backslashes and paths that are not already clean, it rejects control characters (bytes below 0x20 and DEL), invalid UTF-8, paths over 4096 bytes and paths with more than 255 segments. Every path and pattern a reason message names is printed quoted (Go's `%q`), so a file name cannot put a raw newline or terminal escape into a log.
 
 Data flow:
 
@@ -56,21 +61,21 @@ policy.Input{Diff, Rules, ErrorFiles, AttemptsUsed} --policy.Evaluate--> policy.
 
 `Evaluate` takes four things and nothing else: the diff, the rules, the files named in the failure's errors, and the number of attempts already used. There is no input for anything the agent says about its own work, and no state file. It reports every violation it finds, as a list of `Reason` values, each naming a rule from a fixed set. The order is:
 
-1. Rules that are themselves invalid (`invalid_rules`): a limit out of range, an unknown `edit_scope`, an invalid `protected_files` pattern, an empty forbidden pattern, a negative attempt count. If there are any, `Evaluate` returns only these reasons and stops.
+1. Rules that are themselves invalid (`invalid_rules`): a limit out of range, an unknown `edit_scope`, an invalid `protected_files` pattern, an empty forbidden pattern or one containing a newline, a negative attempt count. If there are any, `Evaluate` returns only these reasons and stops, before it looks at any path.
 2. `max_attempts`: attempts used is not below the limit.
 3. `empty_diff`: the diff changes no files.
 4. For each file, in the order the patch lists them:
-   1. `invalid_path`, or `invalid_diff` for a malformed `Diff` value (a negative deletion count, a duplicate path, an unknown change kind, a binary change with line counts, an added line numbered below 1). If either applies, the remaining per-file checks are skipped for that file.
+   1. `invalid_path` (the path fails `checkRepoPath`, above), or `invalid_diff` for a malformed `Diff` value (a negative deletion count, a duplicate path, an unknown change kind, an unknown `Special` value, a binary change with line counts, an added line numbered below 1). If either applies, the remaining per-file checks are skipped for that file.
    2. `protected_file`: the always-protected list, then `protected_files` from the config.
    3. `edit_scope`: with `files_in_errors`, the file must be named in the errors.
    4. `binary_file`.
-   5. `special_file`: symlink, submodule, or mode change.
+   5. `special_file`: symlink, submodule, mode change, or a new file with mode 100755 (executable).
    6. `forbidden_pattern`: one reason per added line and pattern that matches. At most 20 of these are returned; one more reason says how many were left out.
 5. `max_deleted_lines`, then `max_changed_lines` (added plus deleted), over the whole diff.
 
-The diff is allowed exactly when the list of reasons is empty. `AttemptsRemaining` is `max(0, max_attempts - attempts used)` and is reported whether or not the diff is allowed.
+The diff is allowed exactly when the list of reasons is empty. `AttemptsRemaining` is `max(0, max_attempts - attempts used)` and is reported whether or not the diff is allowed. It is computed before the attempt being judged is counted: an allowed submit with 1 of 2 attempts used reports 1, and once that fix is pushed (and so counted), 0 remain.
 
-The diff parser expects the output of `git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames <base> <head>` and rejects anything it does not recognize, because the engine judges only what the parser reports. The code that runs git (`internal/vcs`, M3) must also pin the git settings that change the output format: `diff.suppressBlankEmpty` (off), `diff.noprefix` (off), and the source and destination prefixes (`a/` and `b/`). The parser rejects output that departs from these, which fails closed but would make `regreen` unusable on a machine with such a setting if M3 forgot to pin them.
+The diff parser expects the output of `git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames --ignore-submodules=none <base> <head>` and rejects anything it does not recognize, because the engine judges only what the parser reports. Inside a hunk, the only backslash line it accepts is `\ No newline at end of file`; on mode and `index` lines it accepts only the modes 100644, 100755, 120000 and 160000. The code that runs git (`internal/vcs`, M3) must follow the [git invocation checklist](#git-invocation-checklist-for-m3m4-planned) below. Most settings it pins only change the output format, which the parser rejects (failing closed, but making `regreen` unusable on a machine with such a setting); a few make git leave changes out, which the parser cannot detect.
 
 ## Layout
 
@@ -99,19 +104,30 @@ Packages marked "built" exist; the rest are planned.
 5. If errors remain, the agent edits files and calls `submit_fix`. regreen reads the diff, runs the policy engine, runs every configured check, and only then commits and pushes.
 6. In CI, `regreen verify` applies the same policy, reading it from the base branch. Branch protection makes that check required.
 
+## Git invocation checklist for M3/M4 (planned)
+
+Nothing runs git yet. When `internal/vcs` (M3) and `regreen verify` (M4) do, they must produce the diff like this. Each flag and setting below was checked against `git diff -h` and `git help diff` / `git help config` (git 2.39.5).
+
+1. Run from the repository root and pass `--no-relative`. `diff.relative` (or `--relative`) makes git show only changes under the current directory, with shortened paths; `--no-relative` countermands both.
+2. Pass `--ignore-submodules=none`. With `diff.ignoreSubmodules=all`, `submodule.<name>.ignore=all` in `.git/config`, or `ignore = all` in `.gitmodules`, git leaves a submodule pointer change out of the diff entirely; `none` overrides all three. (Checked in a throwaway repository: without the flag, a commit that bumps a submodule shows no change for it.)
+3. Pin the format settings with `-c`: `-c core.quotepath=off -c diff.suppressBlankEmpty=false -c diff.noprefix=false -c diff.mnemonicPrefix=false`. Pin the prefixes with `--src-prefix=a/ --dst-prefix=b/`: git 2.39.5 documents no config key for the prefixes, so they cannot be pinned with `-c` there, and the command-line flags work regardless of configuration. Keep `--no-color --no-ext-diff --no-textconv --no-renames`.
+4. Treat repository-local git configuration as hostile. The agent works in the same checkout and can write `.git/config` directly (it never appears in a diff) and can edit `.gitmodules` (protected in diffs, but the working copy is what git reads). Some settings only reformat the output and make the parser fail; others, such as the submodule `ignore` settings and `diff.relative` above, make git omit changes, which the parser cannot notice. Override every such setting with an explicit command-line flag rather than trusting the configuration.
+5. Cap the size of git's output before parsing it, and treat output over the cap as a rejection.
+6. Consider the plumbing command `git diff-tree -r -p <base> <head>`, which porcelain settings such as `diff.renames` do not affect. It still honors `.gitmodules` `ignore = all` by default (checked), so it needs `--ignore-submodules=none` and the other flags too.
+
 ## Trust model (M1 to M4)
 
 M1 delivered two parts of this design: the always-protected paths and the policy engine. Everything else below is planned and is labelled with its milestone.
 
 The fixing agent is untrusted. regreen believes the git diff and the result of re-running the checks, and nothing the agent says about its own work. Local protections (the MCP tool flow, the pre-push hook) catch problems early; the enforcement that cannot be bypassed locally is the CI check plus branch protection.
 
-- An agent could change `.github/**` or `regreen.yml` in a diff. Those paths are therefore hardcoded as protected, and the policy rejects a diff that touches them. **Built (M1).** The list is inside `internal/policy`, `Evaluate` applies it on every call, and no config key or caller option removes it. Config can only add protected patterns.
+- An agent could change `.github/**` or `regreen.yml` in a diff. Those paths are therefore hardcoded as protected, and the policy rejects a diff that touches them. **Built (M1).** The list is inside `internal/policy`, `Evaluate` applies it whenever it judges a diff (with invalid rules it rejects the diff before checking any path), and no config key or caller option removes it. Config can only add protected patterns.
 - The policy limits (changed and deleted lines, edit scope, forbidden patterns, attempts) are enforced by `Evaluate`. **Built (M1)**, but nothing calls it yet.
 - `regreen verify` reads the policy from the base branch, never from the pushed commit. **Planned (M4).** M1 only makes it possible: `config.ParseRepo` takes bytes.
 - Attempts are counted from commit trailers in git history, not from a state file. **Planned (M3).** M1 takes the count as an input number.
 - Maintainers make the verify check required in branch protection, so removing it blocks merging. **Planned (M4)**, as documentation and `regreen init`.
 - A human reviews before merge. regreen never merges.
 
-Always-protected paths, hardcoded and not configurable (the full list, with how they match, is in [CONFIG.md](CONFIG.md)): `regreen.yml`, `regreen.yaml`, `.regreen`, `.github`, `.git`, and the git-hook and pre-commit configuration paths `.githooks`, `.husky`, `.pre-commit-config.yaml`, `lefthook.yml` and `.lefthook.yml`.
+Always-protected paths, hardcoded and not configurable (the full list, with how they match, is in [CONFIG.md](CONFIG.md)): `regreen.yml`, `regreen.yaml`, `.regreen`, `.github`, `.git`, `.gitmodules`, and the git-hook and pre-commit configuration paths `.githooks`, `.husky`, `.pre-commit-config.yaml`, `lefthook.yml` and `.lefthook.yml`.
 
 These controls guarantee that a fix follows the rules, not that it is logically correct.

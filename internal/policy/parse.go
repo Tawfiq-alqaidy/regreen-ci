@@ -20,7 +20,12 @@ const (
 
 // ParseUnifiedDiff parses the output of
 //
-//	git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames <base> <head>
+//	git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames --ignore-submodules=none <base> <head>
+//
+// with the other settings in the git invocation checklist in
+// docs/ARCHITECTURE.md. Without --ignore-submodules=none, repository-local
+// configuration can make git omit a submodule change from its output
+// entirely, and the parser cannot see what git did not print.
 //
 // It fails closed: anything it does not recognize is an error naming the
 // 1-based patch line, because the policy engine judges whatever the parser
