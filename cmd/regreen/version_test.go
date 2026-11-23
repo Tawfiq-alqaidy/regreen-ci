@@ -25,6 +25,7 @@ func TestResolveVersion(t *testing.T) {
 		{name: "devel build info is ignored", ldflags: "dev", read: info("(devel)", true), want: "dev"},
 		{name: "empty module version is ignored", ldflags: "dev", read: info("", true), want: "dev"},
 		{name: "no build info", ldflags: "dev", read: info("", false), want: "dev"},
+		{name: "pseudo-version from a local VCS-stamped build is reported", ldflags: "dev", read: info("v0.0.0-20261123151446-f62f1f1a362f+dirty", true), want: "v0.0.0-20261123151446-f62f1f1a362f+dirty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

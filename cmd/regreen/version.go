@@ -11,9 +11,11 @@ const devVersion = "dev"
 var version = devVersion
 
 // resolveVersion picks the version to report. A value injected with ldflags
-// wins. Otherwise it uses the module version that the Go toolchain embeds
-// when the binary is built with "go install module@version". Local builds
-// have neither and report "dev".
+// wins. Otherwise it uses the main module version from the Go build info:
+// the release tag for "go install module@version", or a pseudo-version such
+// as v0.0.0-<date>-<commit>+dirty for a plain "go build" inside a git
+// checkout (the toolchain stamps the VCS state). "dev" is reported only when
+// there is no usable build info: none at all, an empty version, or "(devel)".
 //
 // readBuildInfo is a parameter (in production: debug.ReadBuildInfo) so tests
 // can supply fake build information.
