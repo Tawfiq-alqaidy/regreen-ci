@@ -101,18 +101,64 @@ func (p *parser) section() (FileChange, error) {
 	}
 	p.seen[fc.Path] = true
 
+	var span hunkSpan
 	for p.pos < len(p.lines) && isHunkHeader(p.header(p.pos)) {
 		if h.binary || !h.hasMinus || !h.hasPlus {
 			return FileChange{}, p.errf(p.pos, "hunk without text file headers")
 		}
-		if err := p.hunk(&fc); err != nil {
+		if err := p.hunk(&fc, &span); err != nil {
 			return FileChange{}, err
 		}
+	}
+	if err := p.checkMeaningful(start, h, span); err != nil {
+		return FileChange{}, err
 	}
 	if p.pos < len(p.lines) && !strings.HasPrefix(p.header(p.pos), gitHeaderPrefix) {
 		return FileChange{}, p.errf(p.pos, "unexpected line %q after hunk", clip(p.header(p.pos)))
 	}
 	return fc, nil
+}
+
+// checkMeaningful rejects sections git never emits: every section must carry
+// a mode line, a binary marker, or file headers with at least one hunk, and
+// file headers must be followed by a hunk.
+func (p *parser) checkMeaningful(start int, h fileHeader, span hunkSpan) error {
+	if h.hasMinus && !span.any {
+		return p.errf(start, "--- and +++ lines without a hunk")
+	}
+	if !span.any && !h.binary && !h.newFile && !h.deleted && h.oldMode == "" {
+		return p.errf(start, "section has no mode line, binary marker or hunk")
+	}
+	return nil
+}
+
+// parseIndexLine parses the text after "index ": <hex>..<hex> with an
+// optional single space and a six-digit octal mode, which it returns.
+func parseIndexLine(rest string) (string, error) {
+	spec, mode, hasMode := strings.Cut(rest, " ")
+	oldHash, newHash, ok := strings.Cut(spec, "..")
+	if !ok || !validHash(oldHash) || !validHash(newHash) {
+		return "", fmt.Errorf("malformed index line %q", clip("index "+rest))
+	}
+	if hasMode && !validMode(mode) {
+		return "", fmt.Errorf("malformed index line %q", clip("index "+rest))
+	}
+	return mode, nil
+}
+
+// validHash accepts 4 to 64 hex digits (git abbreviates; --full-index gives
+// 40 or 64).
+func validHash(s string) bool {
+	if len(s) < 4 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func isHunkHeader(line string) bool {
@@ -159,6 +205,13 @@ func (p *parser) skipBinaryPatch() {
 func (p *parser) headerLine(idx int, line string, h *fileHeader) (string, error) {
 	switch {
 	case strings.HasPrefix(line, "index "):
+		mode, err := parseIndexLine(line[len("index "):])
+		if err != nil {
+			return "", p.errf(idx, "%v", err)
+		}
+		if mode != "" {
+			h.modes = append(h.modes, mode)
+		}
 		return "index", nil
 	case line == "GIT binary patch":
 		h.binary = true
@@ -435,10 +488,13 @@ func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 // hunk parses one hunk at the cursor, appending its lines to fc. It counts
 // lines by the hunk header, so added content that looks like a header stays
 // content.
-func (p *parser) hunk(fc *FileChange) error {
+func (p *parser) hunk(fc *FileChange, span *hunkSpan) error {
 	headerIdx := p.pos
-	oldCount, newStart, newCount, err := parseHunkHeader(p.header(headerIdx))
+	oldStart, oldCount, newStart, newCount, err := parseHunkHeader(p.header(headerIdx))
 	if err != nil {
+		return p.errf(headerIdx, "%v", err)
+	}
+	if err := span.accept(fc.Kind, oldStart, oldCount, newStart, newCount); err != nil {
 		return p.errf(headerIdx, "%v", err)
 	}
 	if newCount > 0 && newStart < 1 {
@@ -487,28 +543,64 @@ func (p *parser) hunk(fc *FileChange) error {
 	return nil
 }
 
+// hunkSpan remembers where the previous hunk of a file ended on each side.
+type hunkSpan struct {
+	any              bool
+	oldLast, newLast int
+}
+
+// accept checks a hunk against the file's kind and the previous hunk, then
+// records it. A side with a zero count reports the line before the change as
+// its start, so such a side ends at its start; otherwise it ends at
+// start+count-1. Each hunk must start strictly after the previous one ended.
+func (s *hunkSpan) accept(kind ChangeKind, oldStart, oldCount, newStart, newCount int) error {
+	if oldCount == 0 && newCount == 0 {
+		return fmt.Errorf("hunk changes nothing")
+	}
+	if kind == Added && oldCount != 0 {
+		return fmt.Errorf("hunk of a new file removes lines")
+	}
+	if kind == Deleted && newCount != 0 {
+		return fmt.Errorf("hunk of a deleted file adds lines")
+	}
+	if s.any && (oldStart <= s.oldLast || newStart <= s.newLast) {
+		return fmt.Errorf("hunk repeats or overlaps the previous hunk")
+	}
+	s.any = true
+	s.oldLast = endOfSide(oldStart, oldCount)
+	s.newLast = endOfSide(newStart, newCount)
+	return nil
+}
+
+func endOfSide(start, count int) int {
+	if count == 0 {
+		return start
+	}
+	return start + count - 1
+}
+
 // parseHunkHeader parses "@@ -a[,b] +c[,d] @@[ text]".
-func parseHunkHeader(line string) (oldCount, newStart, newCount int, err error) {
+func parseHunkHeader(line string) (oldStart, oldCount, newStart, newCount int, err error) {
 	bad := fmt.Errorf("malformed hunk header %q", clip(line))
 	rest, ok := strings.CutPrefix(line, "@@ -")
 	if !ok {
-		return 0, 0, 0, bad
+		return 0, 0, 0, 0, bad
 	}
 	oldSpec, rest, ok := strings.Cut(rest, " +")
 	if !ok {
-		return 0, 0, 0, bad
+		return 0, 0, 0, 0, bad
 	}
 	newSpec, tail, ok := strings.Cut(rest, " @@")
 	if !ok || (tail != "" && !strings.HasPrefix(tail, " ")) {
-		return 0, 0, 0, bad
+		return 0, 0, 0, 0, bad
 	}
-	if _, oldCount, err = parseRange(oldSpec); err != nil {
-		return 0, 0, 0, bad
+	if oldStart, oldCount, err = parseRange(oldSpec); err != nil {
+		return 0, 0, 0, 0, bad
 	}
 	if newStart, newCount, err = parseRange(newSpec); err != nil {
-		return 0, 0, 0, bad
+		return 0, 0, 0, 0, bad
 	}
-	return oldCount, newStart, newCount, nil
+	return oldStart, oldCount, newStart, newCount, nil
 }
 
 // parseRange parses "start[,count]"; an omitted count is 1.

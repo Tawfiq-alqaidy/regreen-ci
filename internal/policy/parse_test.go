@@ -18,7 +18,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		{name: "newline only", patch: "\n", want: Diff{}},
 		{
 			name: "modified with context",
-			patch: "diff --git a/a.go b/a.go\nindex 1..2 100644\n--- a/a.go\n+++ b/a.go\n" +
+			patch: "diff --git a/a.go b/a.go\nindex 1111111..2222222 100644\n--- a/a.go\n+++ b/a.go\n" +
 				"@@ -1,3 +1,4 @@ func x()\n one\n-two\n+TWO\n+two2\n three\n",
 			want: Diff{Files: []FileChange{{
 				Path: "a.go", Kind: Modified, Deleted: 1,
@@ -44,7 +44,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "new file",
-			patch: "diff --git a/new.go b/new.go\nnew file mode 100644\nindex 0000000..1\n" +
+			patch: "diff --git a/new.go b/new.go\nnew file mode 100644\nindex 0000000..1111111\n" +
 				"--- /dev/null\n+++ b/new.go\n@@ -0,0 +1,2 @@\n+a\n+b\n",
 			want: Diff{Files: []FileChange{{
 				Path: "new.go", Kind: Added, Added: []Line{{1, "a"}, {2, "b"}},
@@ -52,7 +52,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "deleted file",
-			patch: "diff --git a/old.go b/old.go\ndeleted file mode 100644\nindex 1..0000000\n" +
+			patch: "diff --git a/old.go b/old.go\ndeleted file mode 100644\nindex 1111111..0000000\n" +
 				"--- a/old.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n",
 			want: Diff{Files: []FileChange{{Path: "old.go", Kind: Deleted, Deleted: 2}}},
 		},
@@ -75,7 +75,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name:  "binary files line",
-			patch: "diff --git a/img.png b/img.png\nindex 1..2 100644\nBinary files a/img.png and b/img.png differ\n",
+			patch: "diff --git a/img.png b/img.png\nindex 1111111..2222222 100644\nBinary files a/img.png and b/img.png differ\n",
 			want:  Diff{Files: []FileChange{{Path: "img.png", Kind: Modified, Binary: true}}},
 		},
 		{
@@ -95,7 +95,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "mode change with content",
-			patch: "diff --git a/m.sh b/m.sh\nold mode 100644\nnew mode 100755\nindex 1..2\n" +
+			patch: "diff --git a/m.sh b/m.sh\nold mode 100644\nnew mode 100755\nindex 1111111..2222222\n" +
 				"--- a/m.sh\n+++ b/m.sh\n@@ -1,2 +1,3 @@\n a\n b\n+c\n",
 			want: Diff{Files: []FileChange{{
 				Path: "m.sh", Kind: Modified, Special: "mode change", Added: []Line{{3, "c"}},
@@ -103,7 +103,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "new symlink",
-			patch: "diff --git a/link b/link\nnew file mode 120000\nindex 0000000..1\n--- /dev/null\n+++ b/link\n" +
+			patch: "diff --git a/link b/link\nnew file mode 120000\nindex 0000000..1111111\n--- /dev/null\n+++ b/link\n" +
 				"@@ -0,0 +1 @@\n+b.txt\n\\ No newline at end of file\n",
 			want: Diff{Files: []FileChange{{
 				Path: "link", Kind: Added, Special: "symlink", Added: []Line{{1, "b.txt"}},
@@ -111,14 +111,14 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name:  "new submodule",
-			patch: "diff --git a/sub b/sub\nnew file mode 160000\nindex 0000000..1\n--- /dev/null\n+++ b/sub\n@@ -0,0 +1 @@\n+Subproject commit abc\n",
+			patch: "diff --git a/sub b/sub\nnew file mode 160000\nindex 0000000..1111111\n--- /dev/null\n+++ b/sub\n@@ -0,0 +1 @@\n+Subproject commit abc\n",
 			want: Diff{Files: []FileChange{{
 				Path: "sub", Kind: Added, Special: "submodule", Added: []Line{{1, "Subproject commit abc"}},
 			}}},
 		},
 		{
 			name:  "deleted symlink",
-			patch: "diff --git a/link b/link\ndeleted file mode 120000\nindex 1..0000000\n--- a/link\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n\\ No newline at end of file\n",
+			patch: "diff --git a/link b/link\ndeleted file mode 120000\nindex 1111111..0000000\n--- a/link\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n\\ No newline at end of file\n",
 			want:  Diff{Files: []FileChange{{Path: "link", Kind: Deleted, Special: "symlink", Deleted: 1}}},
 		},
 		{
@@ -128,7 +128,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "path with spaces and git trailing tab",
-			patch: "diff --git a/my file.txt b/my file.txt\nindex 1..2 100644\n--- a/my file.txt\t\n+++ b/my file.txt\t\n" +
+			patch: "diff --git a/my file.txt b/my file.txt\nindex 1111111..2222222 100644\n--- a/my file.txt\t\n+++ b/my file.txt\t\n" +
 				"@@ -1 +1,2 @@\n hi\n+more\n",
 			want: Diff{Files: []FileChange{{Path: "my file.txt", Kind: Modified, Added: []Line{{2, "more"}}}}},
 		},
@@ -145,7 +145,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "quoted tab path",
-			patch: "diff --git \"a/tab\\there.txt\" \"b/tab\\there.txt\"\nindex 1..2 100644\n" +
+			patch: "diff --git \"a/tab\\there.txt\" \"b/tab\\there.txt\"\nindex 1111111..2222222 100644\n" +
 				"--- \"a/tab\\there.txt\"\n+++ \"b/tab\\there.txt\"\n@@ -1 +1,2 @@\n t\n+z\n",
 			want: Diff{Files: []FileChange{{Path: "tab\there.txt", Kind: Modified, Added: []Line{{2, "z"}}}}},
 		},
@@ -157,7 +157,7 @@ func TestParseUnifiedDiff(t *testing.T) {
 		},
 		{
 			name: "quoted path with quote, space and git trailing tab",
-			patch: "diff --git \"a/q \\\"s.txt\" \"b/q \\\"s.txt\"\nindex 1..2 100644\n" +
+			patch: "diff --git \"a/q \\\"s.txt\" \"b/q \\\"s.txt\"\nindex 1111111..2222222 100644\n" +
 				"--- \"a/q \\\"s.txt\"\t\n+++ \"b/q \\\"s.txt\"\t\n@@ -1 +1,2 @@\n y\n+z\n",
 			want: Diff{Files: []FileChange{{Path: "q \"s.txt", Kind: Modified, Added: []Line{{2, "z"}}}}},
 		},
@@ -278,7 +278,7 @@ func TestParseUnifiedDiffErrors(t *testing.T) {
 		{"new file with old mode", "diff --git a/x b/x\nnew file mode 100644\nold mode 100644\nnew mode 100755\n"},
 		{"old mode alone", "diff --git a/x b/x\nold mode 100644\n"},
 		{"bad mode", "diff --git a/x b/x\nnew file mode 12\n"},
-		{"duplicate index", "diff --git a/x b/x\nindex 1..2\nindex 1..2\n"},
+		{"duplicate index", "diff --git a/x b/x\nindex 1111111..2222222\nindex 1111111..2222222\n"},
 		{"binary with hunks", "diff --git a/x b/x\nBinary files a/x and b/x differ\n@@ -1 +1 @@\n-a\n+b\n"},
 		{"binary with file headers", "diff --git a/x b/x\n--- a/x\n+++ b/x\nBinary files a/x and b/x differ\n"},
 		{"bad quoted escape", "diff --git \"a/bad\\9\" \"b/bad\\9\"\n"},
