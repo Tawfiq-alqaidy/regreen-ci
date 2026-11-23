@@ -4,20 +4,24 @@ regreen is one binary with several subcommands over one shared core. This docume
 
 ## What exists today (M0)
 
+Every statement in this section must be checked against the code at the end of each milestone.
+
 ```
 cmd/regreen/
-  main.go      main(): passes os.Args, os.Stdout, os.Stderr to run
+  main.go      main(): passes os.Args[1:], os.Stdout, os.Stderr to run
   app.go       run(): command dispatch, usage text, exit codes
   version.go   resolveVersion(): ldflags value, then Go build info, then "dev"
 ```
 
-A plain `go build` inside a git checkout reports a pseudo-version such as `v0.0.0-<date>-<commit>+dirty`, because the Go toolchain stamps the binary with the commit it was built from. `dev` appears only when there is no build information at all.
+A plain `go build` inside a git checkout reports a pseudo-version such as `v0.0.0-<date>-<commit>+dirty`, because the Go toolchain stamps the binary with the commit it was built from. `dev` is reported when there is no usable build information (none, an empty version, or `(devel)`).
 
 `main()` contains no logic. `run(args, stdout, stderr)` returns the exit code, so tests call it in-process with in-memory buffers instead of starting a subprocess.
 
 Output discipline: requested output (help, version) goes to stdout, and every diagnostic goes to stderr. This matters because `regreen mcp` will speak the MCP protocol over stdio, where stdout is reserved for the protocol and one stray print breaks the server.
 
 Exit codes: `0` success, `1` error, `2` usage error (no command, or an unknown one).
+
+`-h` and `--help` are aliases of `help`, and `--version` is an alias of `version`. The planned commands (`mcp`, `verify`, `init`, `watch`) are listed in help but exit 1 with "not implemented yet (planned for milestone Mx)" on stderr.
 
 ## Planned layout
 
@@ -44,8 +48,17 @@ Exit codes: `0` success, `1` error, `2` usage error (no command, or an unknown o
 5. If errors remain, the agent edits files and calls `submit_fix`. regreen reads the diff, runs the policy engine, runs every configured check, and only then commits and pushes.
 6. In CI, `regreen verify` applies the same policy, reading it from the base branch. Branch protection makes that check required.
 
-## Trust model
+## Trust model (planned, M1 to M4)
 
-The fixing agent is untrusted. regreen believes the git diff and the result of re-running the checks, and nothing the agent says about its own work. Local protections (the MCP tool flow, the pre-push hook) catch problems early; the enforcement that cannot be bypassed is the CI check plus branch protection, because the agent cannot edit either.
+Nothing in this section exists yet. It describes the design the milestones will build.
+
+The fixing agent is untrusted. regreen believes the git diff and the result of re-running the checks, and nothing the agent says about its own work. Local protections (the MCP tool flow, the pre-push hook) catch problems early; the enforcement that cannot be bypassed locally is the CI check plus branch protection.
+
+- An agent could change `.github/**` or `regreen.yml` in a diff. Those paths are therefore hardcoded as protected, and the policy rejects a diff that touches them.
+- `regreen verify` reads the policy from the base branch, never from the pushed commit.
+- Maintainers make the verify check required in branch protection, so removing it blocks merging.
+- A human reviews before merge. regreen never merges.
 
 Always-protected paths, hardcoded and not configurable: `regreen.yml`, `.github/**`, `.regreen/**`, and git hooks.
+
+These controls guarantee that a fix follows the rules, not that it is logically correct.
