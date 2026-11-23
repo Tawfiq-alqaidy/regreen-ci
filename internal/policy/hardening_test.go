@@ -462,8 +462,12 @@ func TestHardeningScenarios(t *testing.T) {
 	})
 }
 
+// TestPolicyPackageIsPure checks the non-test sources import exactly the
+// standard-library packages on this list. A new import, even from the
+// standard library, must be added here deliberately after checking it does no
+// I/O and reads no environment, clock or randomness.
 func TestPolicyPackageIsPure(t *testing.T) {
-	forbidden := []string{"os", "os/exec", "io/fs", "io/ioutil", "net", "net/http", "time", "syscall", "unsafe"}
+	allowed := []string{"errors", "fmt", "path", "slices", "strconv", "strings", "unicode/utf8"}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -479,15 +483,8 @@ func TestPolicyPackageIsPure(t *testing.T) {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		for _, imp := range f.Imports {
-			p := strings.Trim(imp.Path.Value, `"`)
-			first, _, _ := strings.Cut(p, "/")
-			switch {
-			case strings.Contains(first, "."):
-				t.Errorf("%s imports third-party package %q", name, p)
-			case slices.Contains(forbidden, p):
-				t.Errorf("%s imports impure package %q", name, p)
-			case strings.HasPrefix(p, "github.com/Tawfiq-alqaidy/regreen-ci/"):
-				t.Errorf("%s imports module package %q", name, p)
+			if p := strings.Trim(imp.Path.Value, `"`); !slices.Contains(allowed, p) {
+				t.Errorf("%s imports %q, which is not on the purity allowlist", name, p)
 			}
 		}
 	}

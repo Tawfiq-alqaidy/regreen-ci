@@ -338,6 +338,9 @@ func TestDiffTotalsAndKindString(t *testing.T) {
 func FuzzParseUnifiedDiff(f *testing.F) {
 	f.Add("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")
 	f.Add("")
+	f.Add("diff --git \"a/x\\ny\" \"b/x\\ny\"\nold mode 100644\nnew mode 100755\n")
+	f.Add("diff --git a/n.sh b/n.sh\nnew file mode 100755\nindex 0000000..1111111\n--- /dev/null\n+++ b/n.sh\n@@ -0,0 +1 @@\n+x\r\n")
+	f.Add(realMultiHunkU0)
 	f.Fuzz(func(t *testing.T, patch string) {
 		d, err := ParseUnifiedDiff(patch)
 		if err != nil {
@@ -347,8 +350,26 @@ func FuzzParseUnifiedDiff(f *testing.F) {
 			if fc.Path == "" || strings.HasPrefix(fc.Path, "/") || fc.Path != path.Clean(fc.Path) || strings.HasPrefix(fc.Path, "../") || fc.Path == ".." {
 				t.Fatalf("accepted unsafe path %q", fc.Path)
 			}
+			if hasControl(fc.Path) {
+				t.Fatalf("accepted path with a control character %q", fc.Path)
+			}
 			if fc.Deleted < 0 {
 				t.Fatalf("negative deleted count")
+			}
+			for _, l := range fc.Added {
+				if strings.Contains(l.Text, "\n") {
+					t.Fatalf("added line %d of %q contains a newline", l.Number, fc.Path)
+				}
+			}
+		}
+		for _, rules := range []Rules{DefaultRules(), rulesWith(func(r *Rules) {
+			r.EditScope = ScopeAny
+			r.ProtectedFiles = []string{"src/**/*.go"}
+			r.ForbiddenPatterns = []string{"x"}
+		})} {
+			v := Evaluate(Input{Diff: d, Rules: rules, ErrorFiles: []string{"x"}})
+			if v.Allowed != (len(v.Reasons) == 0) {
+				t.Fatalf("Allowed %v with %d reasons", v.Allowed, len(v.Reasons))
 			}
 		}
 	})
