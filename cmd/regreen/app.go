@@ -13,17 +13,17 @@ const (
 	exitUsage = 2
 )
 
-const usage = `regreen hands mechanical CI failures to your own coding agent
+const usage = `regreen hands mechanical CI failures to your own coding agent (planned)
 and validates the fix against strict rules before anything is pushed.
 
 Usage:
   regreen <command> [arguments]
 
 Commands:
-  mcp       Run the MCP server over stdio for a coding agent
-  verify    Check a pushed change against the repository policy (for CI)
-  init      Set up regreen.yml, the pre-push hook, and agent permission hints
-  watch     Watch CI for manually pushed commits
+  mcp       Run the MCP server over stdio for a coding agent (planned)
+  verify    Check a pushed change against the repository policy (for CI) (planned)
+  init      Set up regreen.yml, the pre-push hook, and agent permission hints (planned)
+  watch     Watch CI for manually pushed commits (planned)
   version   Print the regreen version
   help      Show this help
 
