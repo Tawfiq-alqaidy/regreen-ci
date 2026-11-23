@@ -40,6 +40,17 @@ func TestMatchPath(t *testing.T) {
 		{"!a", "a", false},
 		{"/a/b/", "a/b/c", true},
 		{"/a/b", "x/a/b", false},
+		{"**", "a", true},
+		{"**", "a/b/c", true},
+		{"/**", "a", true},
+		{"/**", "a/b/c", true},
+		{"a/**/**/b", "a/b", true},
+		{"a/**/**/b", "a/x/y/b", true},
+		{"a/**/**/b", "a/x/b/c", true},
+		{"a/**/**/b", "a/x/c", false},
+		{"a/**/**/b", "x/a/b", false},
+		{"**/**", "a", true},
+		{"**/**", "a/b/c", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern+"|"+tt.path, func(t *testing.T) {

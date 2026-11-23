@@ -76,6 +76,10 @@ func ValidatePattern(pattern string) error {
 
 // MatchPath reports whether the repo-relative, slash-separated path is
 // covered by pattern. Call ValidatePattern first; an invalid pattern never matches.
+//
+// An anchored pattern covers a path when it matches the whole path or any
+// leading directory prefix of it. Matching runs in
+// O(len(pattern segments) x len(path segments)) segment comparisons.
 func MatchPath(pattern, p string) bool {
 	pp, err := parsePattern(pattern)
 	if err != nil {
@@ -85,42 +89,64 @@ func MatchPath(pattern, p string) bool {
 
 	if pp.anyDepth {
 		for _, seg := range pathSegs {
-			if ok, err := path.Match(pp.segments[0], seg); err == nil && ok {
+			if segmentMatch(pp.segments[0], seg) {
 				return true
 			}
 		}
 		return false
 	}
+	return matchPrefix(collapseDoubleStars(pp.segments), pathSegs)
+}
 
-	// Anchored: the pattern covers the path or any leading directory prefix.
-	for n := 1; n <= len(pathSegs); n++ {
-		if matchSegments(pp.segments, pathSegs[:n]) {
+// collapseDoubleStars replaces each run of consecutive ** segments with one;
+// a run matches exactly what a single ** matches.
+func collapseDoubleStars(pat []string) []string {
+	out := make([]string, 0, len(pat))
+	for i, seg := range pat {
+		if seg == doubleStar && i > 0 && pat[i-1] == doubleStar {
+			continue
+		}
+		out = append(out, seg)
+	}
+	return out
+}
+
+// matchPrefix reports whether pat matches segs[:n] for some n >= 1. A **
+// pattern segment matches zero or more path segments.
+//
+// It fills the table m[i][j] = "pat[:i] matches segs[:j]" one pattern row at
+// a time, keeping only the previous row: a ** row takes m[i-1][j] (match
+// nothing) or m[i][j-1] (absorb one more segment); any other row takes
+// m[i-1][j-1] when its segment matches segs[j-1]. The last row answers for
+// every prefix length at once.
+func matchPrefix(pat, segs []string) bool {
+	prev := make([]bool, len(segs)+1)
+	cur := make([]bool, len(segs)+1)
+	prev[0] = true
+	for _, ps := range pat {
+		if ps == doubleStar {
+			cur[0] = prev[0]
+			for j := 1; j <= len(segs); j++ {
+				cur[j] = prev[j] || cur[j-1]
+			}
+		} else {
+			cur[0] = false
+			for j := 1; j <= len(segs); j++ {
+				cur[j] = prev[j-1] && segmentMatch(ps, segs[j-1])
+			}
+		}
+		prev, cur = cur, prev
+	}
+	for _, ok := range prev[1:] {
+		if ok {
 			return true
 		}
 	}
 	return false
 }
 
-// matchSegments matches pattern segments against path segments in full.
-// A ** pattern segment matches zero or more path segments.
-func matchSegments(pat, segs []string) bool {
-	for len(pat) > 0 {
-		if pat[0] == doubleStar {
-			rest := pat[1:]
-			for skip := 0; skip <= len(segs); skip++ {
-				if matchSegments(rest, segs[skip:]) {
-					return true
-				}
-			}
-			return false
-		}
-		if len(segs) == 0 {
-			return false
-		}
-		if ok, err := path.Match(pat[0], segs[0]); err != nil || !ok {
-			return false
-		}
-		pat, segs = pat[1:], segs[1:]
-	}
-	return len(segs) == 0
+// segmentMatch matches one pattern segment against one path segment.
+func segmentMatch(pattern, seg string) bool {
+	ok, err := path.Match(pattern, seg)
+	return err == nil && ok
 }
