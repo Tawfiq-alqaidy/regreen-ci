@@ -13,6 +13,9 @@ var alwaysProtected = []string{
 	".regreen",
 	".github",
 	".git",
+	// .gitmodules sets submodule URLs, and "ignore = all" in it hides
+	// submodule changes from git diff.
+	".gitmodules",
 	".githooks",
 	".husky",
 	".pre-commit-config.yaml",
