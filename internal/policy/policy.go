@@ -76,9 +76,13 @@ type Reason struct {
 
 // Verdict is the outcome of Evaluate.
 type Verdict struct {
-	Allowed           bool
-	Reasons           []Reason // empty exactly when Allowed is true
-	AttemptsRemaining int      // max(0, MaxAttempts-AttemptsUsed), independent of Allowed
+	Allowed bool
+	Reasons []Reason // empty exactly when Allowed is true
+	// AttemptsRemaining is max(0, MaxAttempts-AttemptsUsed), independent of
+	// Allowed. It is computed before the attempt being judged is counted: an
+	// allowed submit with AttemptsUsed 1 of 2 reports 1, and once that fix is
+	// pushed (and so counted), 0 remain.
+	AttemptsRemaining int
 }
 
 // Evaluate decides whether the diff is allowed under the rules. It reports
@@ -167,6 +171,12 @@ func checkRules(in Input) []Reason {
 	}
 	if slices.Contains(r.ForbiddenPatterns, "") {
 		bad("forbidden_patterns contains an empty pattern")
+	}
+	for _, p := range r.ForbiddenPatterns {
+		// Added lines never contain a newline, so such a pattern never matches.
+		if strings.Contains(p, "\n") {
+			bad("forbidden_patterns pattern %q contains a newline and can never match a line", p)
+		}
 	}
 	if in.AttemptsUsed < 0 {
 		bad("attempts used is %d but must not be negative", in.AttemptsUsed)

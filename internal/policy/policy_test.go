@@ -358,6 +358,8 @@ func TestEvaluateInvalidRules(t *testing.T) {
 		{"unknown edit scope", func(in *Input) { in.Rules.EditScope = "everything" }},
 		{"empty edit scope", func(in *Input) { in.Rules.EditScope = "" }},
 		{"empty forbidden pattern", func(in *Input) { in.Rules.ForbiddenPatterns = []string{""} }},
+		{"forbidden pattern with newline", func(in *Input) { in.Rules.ForbiddenPatterns = []string{"eslint-disable\n"} }},
+		{"forbidden pattern that is only a newline", func(in *Input) { in.Rules.ForbiddenPatterns = []string{"ok", "\n"} }},
 		{"negative attempts used", func(in *Input) { in.AttemptsUsed = -1 }},
 		{"protected pattern with empty segment", func(in *Input) { in.Rules.ProtectedFiles = []string{"src//secret.ts"} }},
 		{"protected pattern with unclosed bracket", func(in *Input) { in.Rules.ProtectedFiles = []string{"secret[.ts"} }},
