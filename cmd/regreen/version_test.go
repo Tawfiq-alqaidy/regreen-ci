@@ -21,6 +21,7 @@ func TestResolveVersion(t *testing.T) {
 		want    string
 	}{
 		{name: "ldflags value wins", ldflags: "v1.2.3", read: info("v9.9.9", true), want: "v1.2.3"},
+		{name: "empty ldflags value is treated as unset", ldflags: "", read: info("v0.4.0", true), want: "v0.4.0"},
 		{name: "falls back to module version from go install", ldflags: "dev", read: info("v0.4.0", true), want: "v0.4.0"},
 		{name: "devel build info is ignored", ldflags: "dev", read: info("(devel)", true), want: "dev"},
 		{name: "empty module version is ignored", ldflags: "dev", read: info("", true), want: "dev"},
