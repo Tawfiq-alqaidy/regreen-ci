@@ -43,6 +43,7 @@ make check          # vet, lint, tests
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decisions log](docs/DECISIONS.md)
+- [Milestone M0 summary](docs/milestones/M0.md)
 
 ## License
 
