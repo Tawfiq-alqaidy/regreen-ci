@@ -46,25 +46,26 @@ var plannedCommands = map[string]string{
 // arguments and output streams as parameters instead of reading os.Args and
 // os.Stdout directly, so tests can call it in-process. Requested output goes
 // to stdout; every diagnostic goes to stderr, because "regreen mcp" will
-// reserve stdout for the MCP protocol.
+// reserve stdout for the MCP protocol. Write errors are deliberately discarded
+// (_, _ =): there is nowhere left to report a failed write to stdout or stderr.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
 	switch cmd := args[0]; cmd {
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return exitOK
 	case "version", "--version":
-		fmt.Fprintf(stdout, "regreen %s\n", resolveVersion(version, debug.ReadBuildInfo))
+		_, _ = fmt.Fprintf(stdout, "regreen %s\n", resolveVersion(version, debug.ReadBuildInfo))
 		return exitOK
 	default:
 		if milestone, ok := plannedCommands[cmd]; ok {
-			fmt.Fprintf(stderr, "regreen %s: not implemented yet (planned for milestone %s)\n", cmd, milestone)
+			_, _ = fmt.Fprintf(stderr, "regreen %s: not implemented yet (planned for milestone %s)\n", cmd, milestone)
 			return exitError
 		}
-		fmt.Fprintf(stderr, "regreen: unknown command %q\nRun 'regreen help' for usage.\n", cmd)
+		_, _ = fmt.Fprintf(stderr, "regreen: unknown command %q\nRun 'regreen help' for usage.\n", cmd)
 		return exitUsage
 	}
 }
