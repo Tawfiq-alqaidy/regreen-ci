@@ -13,7 +13,7 @@ const (
 	exitUsage = 2
 )
 
-const usage = `regreen hands mechanical CI failures to your own coding agent (planned)
+const usage = `regreen hands mechanical CI failures to your own coding agent
 and validates the fix against strict rules before anything is pushed.
 
 Usage:
