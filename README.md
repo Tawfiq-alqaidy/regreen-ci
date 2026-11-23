@@ -30,7 +30,7 @@ These controls guarantee that a fix follows the rules, not that it is logically 
 
 ## Build from source
 
-Requires Go 1.27.4 or newer.
+Requires the Go version in the `go` directive of `go.mod`.
 
 ```sh
 make build          # writes bin/regreen
