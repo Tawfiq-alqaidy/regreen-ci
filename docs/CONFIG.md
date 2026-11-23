@@ -54,7 +54,7 @@ The commands are stored as written. The config package never runs or interprets 
 
 ### `policy` (optional)
 
-The whole section may be omitted. Each key may be omitted; a null value also counts as omitted.
+The whole section may be omitted. Each key may be omitted. A key written with no value, or with `null` or `~`, also counts as omitted and takes its default; for example `max_attempts:` with nothing after it means `2`, and `edit_scope:` means `files_in_errors`. This holds for the numeric keys, `edit_scope` and the two lists, but not for list entries: a null entry inside `protected_files` or `forbidden_patterns` is an error.
 
 | Key | Type | Default | Rule |
 |---|---|---|---|
@@ -89,7 +89,8 @@ Patterns are gitignore-style, matched against repo-relative paths with `/` separ
 - A leading `/` anchors the pattern at the root: `/tsconfig.json` matches only the root file.
 - A trailing `/` is allowed and ignored; the pattern then names a directory.
 - A pattern that matches a directory covers everything under it: `node_modules` matches `a/node_modules/x/y.js`.
-- `*` matches any run of characters within one path segment, `?` one character, and `[abc]` or `[a-z]` one character from a set. These are the rules of Go's `path.Match`.
+- `*` matches any run of characters within one path segment, `?` one character, and `[abc]` or `[a-z]` one character from a set. `[^abc]` matches one character not in the set. These are the rules of Go's `path.Match`.
+- `[!abc]` is rejected with an error saying to write `[^abc]`. In gitignore `[!abc]` negates the set, but Go's `path.Match` reads it as a set that contains `!`, so accepting it would silently protect the wrong files.
 - `**` as a whole segment matches zero or more segments: `src/**/gen/*.go` matches `src/gen/a.go` and `src/a/b/gen/a.go`, but not `src/a/b/gen/sub/a.go`. `**` mixed with other characters in a segment (`a**b`) is an error.
 
 These examples come straight from the `TestMatchPath` table in `internal/policy/glob_test.go`:
@@ -116,13 +117,13 @@ These examples come straight from the `TestMatchPath` table in `internal/policy/
 | `a/*.go` | `a/b/c.go` | no |
 | `Tsconfig.json` | `tsconfig.json` | no |
 
-A pattern is invalid, and `ParseRepo` rejects the file, if it is empty or blank; starts with `!`; contains a backslash, a NUL byte or a newline; is only `/`; has an empty segment (`a//b`); has a segment `.` or `..`; mixes `**` with other characters in a segment; or has a malformed bracket (`a[`).
+A pattern is invalid, and `ParseRepo` rejects the file, if it is empty or blank; has leading or trailing whitespace (it could never match); starts with `!`; contains `[!`; contains a backslash, a NUL byte or a newline; is only `/`; has an empty segment (`a//b`); has a segment `.` or `..`; mixes `**` with other characters in a segment; or has a malformed bracket (`a[`). The error names the entry's position in your list, counting from 0.
 
 Negation (`!`) is rejected on purpose. Configuration can add protection but never remove it, so a `!regreen.yml` line cannot undo the always-protected list.
 
 ### Always-protected paths
 
-These ten patterns are built into the policy engine. No config key or option turns them off, and `protected_files` can only add to them.
+These eleven patterns are built into the policy engine. No config key or option turns them off, and `protected_files` can only add to them.
 
 ```
 regreen.yml
@@ -130,6 +131,7 @@ regreen.yaml
 .regreen
 .github
 .git
+.gitmodules
 .githooks
 .husky
 .pre-commit-config.yaml
@@ -139,7 +141,11 @@ lefthook.yml
 
 They have no slash, so they match at any depth (`pkg/regreen.yml` is protected) and cover everything under a directory (`.github/workflows/ci.yml`). They match case-insensitively, so `Regreen.yml` and `.GitHub/` are protected on file systems that ignore case. Your `protected_files` patterns stay case-sensitive.
 
-The brief asks for "git hooks" to be protected without listing them. `.githooks`, `.husky`, `.pre-commit-config.yaml`, `lefthook.yml` and `.lefthook.yml` are this project's reading of that phrase (decision D16), and the list can be extended. `.gitignore` is not in the list, and neither is anything else not named above.
+The brief asks for "git hooks" to be protected without listing them. `.githooks`, `.husky`, `.pre-commit-config.yaml`, `lefthook.yml` and `.lefthook.yml` are this project's reading of that phrase (decision D16), and the list can be extended. `.gitmodules` is on the list because it sets submodule URLs and because `ignore = all` in it makes `git diff` leave submodule changes out entirely (decision D26); this goes beyond the paths the brief names. `.gitignore` is not in the list, and neither is anything else not named above.
+
+### Paths in a diff
+
+A path in a diff must be a clean repo-relative path with `/` separators: not empty, not absolute, no `.` or `..` segment, no empty segment, no backslash. It must also be valid UTF-8 with no control characters (bytes below 0x20, and DEL), at most 4096 bytes long, and have at most 255 segments. The parser rejects a patch that names such a path, and `Evaluate` reports it as `invalid_path`. Git writes a name with a tab, newline or other control character in quotes (`"a/tab\there.txt"`); such a name is rejected, while a quoted name that only escapes UTF-8 (`"a/caf\303\251.txt"`) is accepted.
 
 ### Rejection reasons
 
@@ -147,20 +153,20 @@ The brief asks for "git hooks" to be protected without listing them. `.githooks`
 
 | Rule | Meaning |
 |---|---|
-| `invalid_rules` | The rules cannot be interpreted: a limit out of range, an unknown `edit_scope`, an invalid `protected_files` pattern, an empty forbidden pattern, a negative attempt count. Only these reasons are returned; the diff is not judged. Rules from `ParseRepo` never trigger this. |
+| `invalid_rules` | The rules cannot be interpreted: a limit out of range, an unknown `edit_scope`, an invalid `protected_files` pattern, an empty forbidden pattern or one containing a newline, a negative attempt count. Only these reasons are returned; the diff is not judged. Rules from `ParseRepo` never trigger this. |
 | `max_attempts` | The attempts already used reached `max_attempts`. The agent should stop and report to the developer. |
 | `empty_diff` | The diff changes no files. |
-| `invalid_path` | A path in the diff is not a clean repo-relative path (absolute, `..`, backslash, NUL byte, not normalized). |
-| `invalid_diff` | A file entry could not have come from git: a negative deletion count, a duplicate path, an unknown change kind, a binary change with line counts, an added line numbered below 1. |
+| `invalid_path` | A path in the diff breaks the rules in "Paths in a diff" above. |
+| `invalid_diff` | A file entry could not have come from git: a negative deletion count, a duplicate path, an unknown change kind or special kind, a binary change with line counts, an added line numbered below 1. |
 | `protected_file` | The file matches an always-protected pattern or one of `protected_files`. The message says which. |
 | `edit_scope` | With `files_in_errors`, the file is not named in the errors. |
 | `binary_file` | A binary change. |
-| `special_file` | A symlink, submodule or file-mode change. |
+| `special_file` | A symlink, submodule or file-mode change, or a new executable file (a new file with mode 100755). Changing the content of, or deleting, an existing executable file is allowed. |
 | `forbidden_pattern` | An added line contains a forbidden pattern. |
 | `max_deleted_lines` | The diff deletes more lines than `max_deleted_lines`. |
 | `max_changed_lines` | Lines added plus lines deleted exceed `max_changed_lines`. |
 
-The order in which the engine applies them is in [the architecture document](ARCHITECTURE.md).
+The order in which the engine applies them is in [the architecture document](ARCHITECTURE.md). Messages print every path and pattern in double quotes with Go escaping, for example `"src/b.ts" is not named in the errors; only these files may be edited: "src/a.ts"`.
 
 ### Example errors
 
@@ -173,11 +179,18 @@ regreen.yml: checks[0].run: must be a string (quote the value)
 Several problems in one file are reported together:
 
 ```
-regreen.yml: policy.protected_files[2]: must be a string (quote the value)
 regreen.yml: policy.protected_files[0]: "!a": negation with ! is not supported: a pattern can add protection, never remove it
 regreen.yml: policy.protected_files[1]: "a//b": pattern has an empty path segment
+regreen.yml: policy.protected_files[2]: must be a string (quote the value)
 regreen.yml: policy.max_attempts: 0 must be between 1 and 1000000
 regreen.yml: policy.edit_scope: "some" must be "files_in_errors" or "any"
+```
+
+Patterns that could never match, or would match the wrong files:
+
+```
+regreen.yml: policy.protected_files[0]: " a": pattern has leading or trailing whitespace, so it could never match
+regreen.yml: policy.protected_files[1]: "[!x]*.go": character class negation [!...] is not supported: use [^...]
 ```
 
 An unknown key, an anchor, an empty file, a missing check list, and a second document:
