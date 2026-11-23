@@ -14,8 +14,27 @@ import (
 //
 //	git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames
 //
-// run in a throwaway repository.
+// run in a throwaway repository; patchGitmodulesIgnore and
+// patchGitmodulesIgnoreAndBump also pass --ignore-submodules=none.
 const (
+	patchGitmodulesIgnore = "diff --git a/.gitmodules b/.gitmodules\n" +
+		"index 008e8ed..9c70203 100644\n" +
+		"--- a/.gitmodules\n" +
+		"+++ b/.gitmodules\n" +
+		"@@ -1,3 +1,4 @@\n" +
+		" [submodule \"lib\"]\n" +
+		" \tpath = lib\n" +
+		" \turl = ../lib\n" +
+		"+\tignore = all\n"
+	patchGitmodulesIgnoreAndBump = patchGitmodulesIgnore +
+		"diff --git a/lib b/lib\n" +
+		"index 474a51c..9ddda10 160000\n" +
+		"--- a/lib\n" +
+		"+++ b/lib\n" +
+		"@@ -1 +1 @@\n" +
+		"-Subproject commit 474a51c5a81dd7887f4f0af2ecf465d02179aa07\n" +
+		"+Subproject commit 9ddda108045032a13bb90cd8dfe47352cd9b5343\n"
+
 	patchRelaxRules = `diff --git a/regreen.yml b/regreen.yml
 index 169650b..611e842 100644
 --- a/regreen.yml
@@ -439,6 +458,23 @@ func TestHardeningScenarios(t *testing.T) {
 		if v.Reasons[0].File != ".github/workflows/ci.yml" || v.Reasons[1].File != ".husky/pre-push" {
 			t.Errorf("files = %q, %q", v.Reasons[0].File, v.Reasons[1].File)
 		}
+	})
+
+	t.Run("agent hides a submodule change with ignore = all in .gitmodules", func(t *testing.T) {
+		// With "ignore = all" in .gitmodules, git diff without
+		// --ignore-submodules=none omits the submodule pointer change
+		// entirely; the .gitmodules edit itself is always protected.
+		in := hardeningInput(t, patchGitmodulesIgnore, ".gitmodules")
+		in.Rules.EditScope = ScopeAny
+		v := Evaluate(in)
+		wantRules(t, v, RuleProtectedFile)
+		if v.Reasons[0].File != ".gitmodules" {
+			t.Errorf("file = %q", v.Reasons[0].File)
+		}
+
+		in = hardeningInput(t, patchGitmodulesIgnoreAndBump, ".gitmodules", "lib")
+		in.Rules.EditScope = ScopeAny
+		wantRules(t, Evaluate(in), RuleProtectedFile, RuleSpecialFile)
 	})
 
 	t.Run("an honest one-line fix passes", func(t *testing.T) {
