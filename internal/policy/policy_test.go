@@ -149,12 +149,6 @@ func TestEvaluate(t *testing.T) {
 			},
 		},
 		{
-			name: "negation in config cannot unprotect",
-			in: Input{Diff: Diff{Files: []FileChange{mod("regreen.yml", 0, "x")}},
-				Rules: rulesWith(func(r *Rules) { r.EditScope = ScopeAny; r.ProtectedFiles = []string{"!regreen.yml"} })},
-			wantRules: []string{RuleProtectedFile}, wantRemaining: 2,
-		},
-		{
 			name: "forbidden pattern on added line",
 			in: Input{Diff: Diff{Files: []FileChange{mod("src/a.ts", 0, "ok", "// eslint-disable-next-line")}},
 				Rules:      rulesWith(func(r *Rules) { r.ForbiddenPatterns = []string{"eslint-disable"} }),
@@ -201,7 +195,7 @@ func TestEvaluate(t *testing.T) {
 			check: func(t *testing.T, v Verdict) {
 				t.Helper()
 				last := v.Reasons[20]
-				if last.File != "" || last.Line != 0 || last.Message != "and 5 more added lines contain forbidden patterns" {
+				if last.File != "" || last.Line != 0 || last.Message != "and 5 more forbidden-pattern matches" {
 					t.Errorf("summary = %+v", last)
 				}
 			},
@@ -365,6 +359,9 @@ func TestEvaluateInvalidRules(t *testing.T) {
 		{"empty edit scope", func(in *Input) { in.Rules.EditScope = "" }},
 		{"empty forbidden pattern", func(in *Input) { in.Rules.ForbiddenPatterns = []string{""} }},
 		{"negative attempts used", func(in *Input) { in.AttemptsUsed = -1 }},
+		{"protected pattern with empty segment", func(in *Input) { in.Rules.ProtectedFiles = []string{"src//secret.ts"} }},
+		{"protected pattern with unclosed bracket", func(in *Input) { in.Rules.ProtectedFiles = []string{"secret[.ts"} }},
+		{"protected pattern negation", func(in *Input) { in.Rules.ProtectedFiles = []string{"!regreen.yml"} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -508,5 +505,94 @@ func TestEvaluateMessagesAreOneSentence(t *testing.T) {
 		if r.Rule == "" {
 			t.Errorf("empty rule: %+v", r)
 		}
+	}
+}
+
+func TestEvaluateRejectsUnreadableProtectedPatterns(t *testing.T) {
+	for _, pattern := range []string{"src//secret.ts", "secret[.ts", "!regreen.yml"} {
+		t.Run(pattern, func(t *testing.T) {
+			in := Input{
+				Diff:  Diff{Files: []FileChange{mod("src/secret.ts", 0, "x"), mod("regreen.yml", 0, "y")}},
+				Rules: rulesWith(func(r *Rules) { r.EditScope = ScopeAny; r.ProtectedFiles = []string{pattern} }),
+			}
+			v := Evaluate(in)
+			if v.Allowed || !slices.Equal(ruleNames(v), []string{RuleInvalidRules}) {
+				t.Fatalf("verdict = %+v", v)
+			}
+			if !strings.Contains(v.Reasons[0].Message, pattern) {
+				t.Errorf("Message = %q does not name the pattern", v.Reasons[0].Message)
+			}
+		})
+	}
+}
+
+func TestEvaluateInvalidDiff(t *testing.T) {
+	anyScope := rulesWith(func(r *Rules) { r.EditScope = ScopeAny; r.ForbiddenPatterns = []string{"bad"} })
+	tests := []struct {
+		name string
+		diff Diff
+		want []string
+	}{
+		{"negative deleted", Diff{Files: []FileChange{mod("a.ts", -1)}}, []string{RuleInvalidDiff}},
+		{"line number zero", Diff{Files: []FileChange{{Path: "a.ts", Added: []Line{{Number: 0, Text: "bad"}}}}}, []string{RuleInvalidDiff}},
+		{"binary with added lines", Diff{Files: []FileChange{{Path: "a.ts", Binary: true, Added: []Line{{Number: 1, Text: "x"}}}}}, []string{RuleInvalidDiff}},
+		{"binary with deleted lines", Diff{Files: []FileChange{{Path: "a.ts", Binary: true, Deleted: 1}}}, []string{RuleInvalidDiff}},
+		{"unknown kind", Diff{Files: []FileChange{{Path: "a.ts", Kind: ChangeKind(7)}}}, []string{RuleInvalidDiff}},
+		{"negative kind", Diff{Files: []FileChange{{Path: "a.ts", Kind: ChangeKind(-1)}}}, []string{RuleInvalidDiff}},
+		{"duplicate path flagged on second", Diff{Files: []FileChange{mod("a.ts", 0, "x"), mod("a.ts", 0, "bad")}}, []string{RuleInvalidDiff}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := Evaluate(Input{Diff: tt.diff, Rules: anyScope})
+			if v.Allowed || !slices.Equal(ruleNames(v), tt.want) {
+				t.Fatalf("verdict = %+v, want %v", v, tt.want)
+			}
+			if v.Reasons[0].File == "" {
+				t.Errorf("reason has no file: %+v", v.Reasons[0])
+			}
+		})
+	}
+
+	t.Run("duplicate reason attaches to the second occurrence", func(t *testing.T) {
+		d := Diff{Files: []FileChange{mod("a.ts", 0, "x"), mod("b.ts", 0, "x"), mod("a.ts", 0, "x")}}
+		v := Evaluate(Input{Diff: d, Rules: anyScope})
+		if len(v.Reasons) != 1 || v.Reasons[0].File != "a.ts" || !strings.Contains(v.Reasons[0].Message, "more than once") {
+			t.Fatalf("reasons = %+v", v.Reasons)
+		}
+	})
+
+	t.Run("negative count cannot offset another file", func(t *testing.T) {
+		in := Input{
+			Diff:       Diff{Files: []FileChange{mod("src/a.ts", 500), mod("src/b.ts", -460)}},
+			Rules:      DefaultRules(),
+			ErrorFiles: []string{"src/a.ts", "src/b.ts"},
+		}
+		want := []string{RuleInvalidDiff, RuleMaxDeletedLines, RuleMaxChangedLines}
+		if got := ruleNames(Evaluate(in)); !slices.Equal(got, want) {
+			t.Fatalf("rules = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("invalid diff skips other per-file rules", func(t *testing.T) {
+		in := Input{Diff: Diff{Files: []FileChange{mod("regreen.yml", -1, "bad")}}, Rules: anyScope}
+		if got := ruleNames(Evaluate(in)); !slices.Equal(got, []string{RuleInvalidDiff}) {
+			t.Fatalf("rules = %v", got)
+		}
+	})
+}
+
+func TestEvaluateIgnoresBlankErrorFiles(t *testing.T) {
+	in := Input{Diff: Diff{Files: []FileChange{mod("b.ts", 0, "x")}}, Rules: DefaultRules(), ErrorFiles: []string{"", "  ", "a.ts"}}
+	v := Evaluate(in)
+	if got := v.Reasons[0].Message; !strings.HasSuffix(got, "may be edited: a.ts") {
+		t.Errorf("Message = %q", got)
+	}
+	in.ErrorFiles = []string{"", " "}
+	in.Diff = Diff{Files: []FileChange{mod(".", 0, "x"), mod("b.ts", 0, "y")}}
+	if got := ruleNames(Evaluate(in)); !slices.Equal(got, []string{RuleInvalidPath, RuleEditScope}) {
+		t.Errorf("rules = %v", got)
+	}
+	if m := Evaluate(in).Reasons[1].Message; !strings.Contains(m, "no files are named") {
+		t.Errorf("Message = %q", m)
 	}
 }

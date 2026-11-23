@@ -53,6 +53,7 @@ const (
 	RuleEmptyDiff        = "empty_diff"
 	RuleInvalidRules     = "invalid_rules"
 	RuleInvalidPath      = "invalid_path"
+	RuleInvalidDiff      = "invalid_diff"
 	RuleProtectedFile    = "protected_file"
 	RuleEditScope        = "edit_scope"
 	RuleBinaryFile       = "binary_file"
@@ -103,8 +104,11 @@ func Evaluate(in Input) Verdict {
 	}
 
 	named := cleanedSet(in.ErrorFiles)
+	seen := make(map[string]bool, len(in.Diff.Files))
 	for _, f := range in.Diff.Files {
-		reasons = append(reasons, checkFile(f, in.Rules, named)...)
+		duplicate := seen[f.Path]
+		seen[f.Path] = true
+		reasons = append(reasons, checkFile(f, in.Rules, named, duplicate)...)
 	}
 	reasons = append(reasons, totals(in.Diff, in.Rules)...)
 
@@ -132,7 +136,7 @@ func capForbidden(reasons []Reason) []Reason {
 	if extra > 0 {
 		out = append(out, Reason{
 			Rule:    RuleForbiddenPattern,
-			Message: fmt.Sprintf("and %d more added lines contain forbidden patterns", extra),
+			Message: fmt.Sprintf("and %d more forbidden-pattern matches", extra),
 		})
 	}
 	return out
@@ -156,6 +160,11 @@ func checkRules(in Input) []Reason {
 	if r.EditScope != ScopeFilesInErrors && r.EditScope != ScopeAny {
 		bad("edit_scope is %q but must be %q or %q", string(r.EditScope), string(ScopeFilesInErrors), string(ScopeAny))
 	}
+	for _, p := range r.ProtectedFiles {
+		if err := ValidatePattern(p); err != nil {
+			bad("protected_files pattern %q is not valid: %v", p, err)
+		}
+	}
 	if slices.Contains(r.ForbiddenPatterns, "") {
 		bad("forbidden_patterns contains an empty pattern")
 	}
@@ -168,6 +177,9 @@ func checkRules(in Input) []Reason {
 func cleanedSet(files []string) map[string]bool {
 	set := make(map[string]bool, len(files))
 	for _, f := range files {
+		if strings.TrimSpace(f) == "" {
+			continue
+		}
 		set[path.Clean(f)] = true
 	}
 	return set
@@ -183,12 +195,20 @@ func validRepoPath(p string) bool {
 	return path.Clean(p) == p
 }
 
-func checkFile(f FileChange, rules Rules, named map[string]bool) []Reason {
+func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool) []Reason {
 	if !validRepoPath(f.Path) {
 		return []Reason{{
 			Rule:    RuleInvalidPath,
 			File:    f.Path,
 			Message: fmt.Sprintf("the diff contains the path %q, which is not a clean repo-relative path", f.Path),
+		}}
+	}
+
+	if problem := diffProblem(f, duplicate); problem != "" {
+		return []Reason{{
+			Rule:    RuleInvalidDiff,
+			File:    f.Path,
+			Message: fmt.Sprintf("the diff entry for %s is malformed: %s", f.Path, problem),
 		}}
 	}
 
@@ -222,6 +242,27 @@ func checkFile(f FileChange, rules Rules, named map[string]bool) []Reason {
 	return append(reasons, forbiddenReasons(f, rules.ForbiddenPatterns)...)
 }
 
+// diffProblem describes why a FileChange cannot come from a real git diff, or
+// returns "" when it is well formed.
+func diffProblem(f FileChange, duplicate bool) string {
+	switch {
+	case duplicate:
+		return "the path appears more than once"
+	case f.Kind != Modified && f.Kind != Added && f.Kind != Deleted:
+		return fmt.Sprintf("unknown change kind %d", int(f.Kind))
+	case f.Deleted < 0:
+		return fmt.Sprintf("negative deleted line count %d", f.Deleted)
+	case f.Binary && (len(f.Added) > 0 || f.Deleted > 0):
+		return "a binary change cannot have line counts"
+	}
+	for _, l := range f.Added {
+		if l.Number < 1 {
+			return fmt.Sprintf("added line has number %d", l.Number)
+		}
+	}
+	return ""
+}
+
 func editScopeMessage(p string, named map[string]bool) string {
 	if len(named) == 0 {
 		return fmt.Sprintf("%s is not named in the errors; no files are named in the errors", p)
@@ -251,7 +292,12 @@ func forbiddenReasons(f FileChange, patterns []string) []Reason {
 
 func totals(d Diff, rules Rules) []Reason {
 	var reasons []Reason
-	deleted, added := d.DeletedLines(), d.AddedLines()
+	// A malformed negative count is reported as invalid_diff and must not
+	// offset another file's lines here.
+	deleted, added := 0, d.AddedLines()
+	for _, f := range d.Files {
+		deleted += max(0, f.Deleted)
+	}
 	if deleted > rules.MaxDeletedLines {
 		reasons = append(reasons, Reason{
 			Rule:    RuleMaxDeletedLines,

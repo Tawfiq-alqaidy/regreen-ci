@@ -450,8 +450,14 @@ func TestHardeningScenarios(t *testing.T) {
 
 	t.Run("unparseable diff is not evaluated", func(t *testing.T) {
 		// The caller must treat a parse error as a rejection.
-		if _, err := ParseUnifiedDiff(patchRename); err == nil {
+		_, err := ParseUnifiedDiff(patchRename)
+		if err == nil {
 			t.Fatal("rename patch parsed without error")
+		}
+		// The parser rejects a rename at its "diff --git a/X b/Y" line, where the
+		// two names differ, before it reaches any "rename from" header.
+		if !strings.Contains(err.Error(), "names differ") {
+			t.Fatalf("error %q does not report the differing names of the rename", err)
 		}
 	})
 }
