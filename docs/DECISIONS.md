@@ -58,3 +58,17 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Decision:** Every `uses:` in the workflow references a full commit SHA with the tag in a trailing comment. The workflow's token is limited to `contents: read`.
 - **Alternatives:** Pinning to a major tag such as `@v4`.
 - **Why:** Tags can be moved; a SHA cannot. regreen is a tool about not weakening CI, so its own CI should not be changeable from outside the repository.
+
+## D9. Planned commands are listed in help and exit 1 until built
+
+- **Date:** 2026-11-23 (M0)
+- **Decision:** `mcp`, `verify`, `init`, and `watch` appear in `regreen help` now, each marked "(planned)". Running one prints "not implemented yet (planned for milestone Mx)" to stderr and exits 1. Each command leaves `plannedCommands` (and loses its "(planned)" marker) when its milestone lands.
+- **Alternatives:** Ship only `help` and `version`, and describe the rest in the README.
+- **Why:** Approved by the maintainer. Help shows the intended shape of the tool, and a test keeps the help text and the command table in step.
+
+## D10. Exit codes: 0 success, 1 error, 2 usage error
+
+- **Date:** 2026-11-23 (M0)
+- **Decision:** Every subcommand returns one of these three codes. 2 means the invocation itself was wrong (no command, unknown command). 1 means the command ran and failed, or is not built yet.
+- **Alternatives:** A single non-zero code; per-failure codes.
+- **Why:** Scripts, hooks, and CI (`regreen verify` in M4) need to tell "you called it wrong" from "the check failed". Three codes is the common Unix convention and is enough until a concrete need appears.

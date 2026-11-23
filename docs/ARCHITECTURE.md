@@ -21,7 +21,7 @@ Output discipline: requested output (help, version) goes to stdout, and every di
 
 Exit codes: `0` success, `1` error, `2` usage error (no command, or an unknown one).
 
-`-h` and `--help` are aliases of `help`, and `--version` is an alias of `version`. The planned commands (`mcp`, `verify`, `init`, `watch`) are listed in help but exit 1 with "not implemented yet (planned for milestone Mx)" on stderr.
+`-h` and `--help` are aliases of `help`, and `--version` is an alias of `version`. The planned commands (`mcp`, `verify`, `init`, `watch`) are listed in help, marked "(planned)", but exit 1 with "not implemented yet (planned for milestone Mx)" on stderr.
 
 ## Planned layout
 
