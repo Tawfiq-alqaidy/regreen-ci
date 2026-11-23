@@ -40,24 +40,91 @@ type Repo struct {
 	Policy policy.Rules // defaults applied, validated
 }
 
+// The raw structs hold string-valued keys as yaml.Node so that the YAML type
+// of each value can be checked: the library would otherwise stringify ints,
+// bools and floats, and silently drop null list elements. A zero Node means
+// the key was omitted.
 type rawRepo struct {
 	Checks []rawCheck `yaml:"checks"`
 	Policy *rawPolicy `yaml:"policy"`
 }
 
 type rawCheck struct {
-	Name *string `yaml:"name"`
-	Run  *string `yaml:"run"`
-	Fix  *string `yaml:"fix"`
+	Name yaml.Node `yaml:"name"`
+	Run  yaml.Node `yaml:"run"`
+	Fix  yaml.Node `yaml:"fix"`
 }
 
 type rawPolicy struct {
-	ProtectedFiles    []string `yaml:"protected_files"`
-	ForbiddenPatterns []string `yaml:"forbidden_patterns"`
-	MaxChangedLines   *int     `yaml:"max_changed_lines"`
-	MaxDeletedLines   *int     `yaml:"max_deleted_lines"`
-	MaxAttempts       *int     `yaml:"max_attempts"`
-	EditScope         *string  `yaml:"edit_scope"`
+	ProtectedFiles    []yaml.Node `yaml:"protected_files"`
+	ForbiddenPatterns []yaml.Node `yaml:"forbidden_patterns"`
+	MaxChangedLines   *int        `yaml:"max_changed_lines"`
+	MaxDeletedLines   *int        `yaml:"max_deleted_lines"`
+	MaxAttempts       *int        `yaml:"max_attempts"`
+	EditScope         yaml.Node   `yaml:"edit_scope"`
+}
+
+// stringState is how a yaml.Node relates to a string-valued key.
+type stringState int
+
+const (
+	stringAbsent stringState = iota // key omitted
+	stringNull                      // explicit null
+	stringOK                        // a YAML string scalar
+	stringBad                       // anything else
+)
+
+// stringValue classifies n and returns its text when it is a string scalar,
+// that is, a quoted or block scalar, or a plain scalar YAML resolves to !!str.
+func stringValue(n *yaml.Node) (string, stringState) {
+	switch {
+	case n.Kind == 0:
+		return "", stringAbsent
+	case n.Kind != yaml.ScalarNode:
+		return "", stringBad
+	case n.ShortTag() == "!!null":
+		return "", stringNull
+	case n.ShortTag() == "!!str":
+		return n.Value, stringOK
+	}
+	return "", stringBad
+}
+
+// requireString returns the text of n, recording a problem at path when n is
+// present but not a string. Null counts as present only when nullIsBad.
+func requireString(n *yaml.Node, path string, nullIsBad bool, problems *[]error) (string, stringState) {
+	v, st := stringValue(n)
+	if st == stringBad || (st == stringNull && nullIsBad) {
+		*problems = append(*problems, fmt.Errorf("%s: must be a string (quote the value)", path))
+		return "", stringBad
+	}
+	return v, st
+}
+
+// stringList converts a list of nodes, reporting non-strings and nulls with
+// their indexed path.
+func stringList(nodes []yaml.Node, path string, problems *[]error) []string {
+	var out []string
+	for i := range nodes {
+		v, st := requireString(&nodes[i], fmt.Sprintf("%s[%d]", path, i), true, problems)
+		if st == stringOK {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// rejectAnchors reports any anchor, alias, or merge key in the node tree.
+func rejectAnchors(n *yaml.Node) bool {
+	if n.Anchor != "" || n.Kind == yaml.AliasNode || n.ShortTag() == "!!merge" {
+		return true
+	}
+	for _, c := range n.Content {
+		if rejectAnchors(c) {
+			return true
+		}
+	}
+	return false
 }
 
 var checkNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -72,6 +139,15 @@ func decodeStrict[T any](data []byte, what string) (*T, error) {
 	if len(data) > maxConfigBytes {
 		return nil, fmt.Errorf("%s is too large (limit %d bytes)", what, maxConfigBytes)
 	}
+
+	var root yaml.Node
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&root); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	if rejectAnchors(&root) {
+		return nil, fmt.Errorf("%s: anchors and aliases are not allowed", what)
+	}
+
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
@@ -111,9 +187,15 @@ func readLimited(path string) ([]byte, error) {
 // read from the base branch. The run and fix commands are stored as written
 // and never executed or interpreted here.
 func ParseRepo(data []byte) (*Repo, error) {
-	raw, err := decodeStrict[rawRepo](data, RepoFileName)
+	return parseRepo(data, RepoFileName)
+}
+
+// parseRepo is ParseRepo with the name used in error messages: the file name,
+// or the path when loading from disk.
+func parseRepo(data []byte, what string) (*Repo, error) {
+	raw, err := decodeStrict[rawRepo](data, what)
 	if errors.Is(err, errEmptyDocument) {
-		return nil, errors.New(RepoFileName + " is empty")
+		return nil, errors.New(what + " is empty")
 	}
 	if err != nil {
 		return nil, err
@@ -125,6 +207,9 @@ func ParseRepo(data []byte) (*Repo, error) {
 	rules, policyProblems := buildRules(raw.Policy)
 	problems = append(problems, policyProblems...)
 	if len(problems) > 0 {
+		for i, p := range problems {
+			problems[i] = fmt.Errorf("%s: %w", what, p)
+		}
 		return nil, errors.Join(problems...)
 	}
 	return &Repo{Checks: checks, Policy: rules}, nil
@@ -137,12 +222,16 @@ func validateChecks(raw []rawCheck) ([]Check, []error) {
 	var problems []error
 	checks := make([]Check, 0, len(raw))
 	seen := make(map[string]bool, len(raw))
-	for i, rc := range raw {
+	for i := range raw {
+		rc := &raw[i]
 		var c Check
-		if rc.Name == nil || strings.TrimSpace(*rc.Name) == "" {
+		name, st := requireString(&rc.Name, fmt.Sprintf("checks[%d].name", i), true, &problems)
+		switch {
+		case st == stringBad:
+		case st != stringOK || strings.TrimSpace(name) == "":
 			problems = append(problems, fmt.Errorf("checks[%d].name: required", i))
-		} else {
-			c.Name = *rc.Name
+		default:
+			c.Name = name
 			switch {
 			case !checkNamePattern.MatchString(c.Name):
 				problems = append(problems, fmt.Errorf(
@@ -152,20 +241,24 @@ func validateChecks(raw []rawCheck) ([]Check, []error) {
 			}
 			seen[c.Name] = true
 		}
-		if rc.Run == nil || strings.TrimSpace(*rc.Run) == "" {
+		run, st := requireString(&rc.Run, fmt.Sprintf("checks[%d].run", i), true, &problems)
+		switch {
+		case st == stringBad:
+		case st != stringOK || strings.TrimSpace(run) == "":
 			problems = append(problems, fmt.Errorf("checks[%d].run: required", i))
-		} else {
-			c.Run = *rc.Run
-			if strings.ContainsRune(c.Run, 0) {
+		default:
+			c.Run = run
+			if strings.ContainsRune(run, 0) {
 				problems = append(problems, fmt.Errorf("checks[%d].run: must not contain a NUL byte", i))
 			}
 		}
-		if rc.Fix != nil {
-			c.Fix = *rc.Fix
-			if strings.TrimSpace(c.Fix) == "" {
+		fix, st := requireString(&rc.Fix, fmt.Sprintf("checks[%d].fix", i), false, &problems)
+		if st == stringOK {
+			c.Fix = fix
+			if strings.TrimSpace(fix) == "" {
 				problems = append(problems, fmt.Errorf("checks[%d].fix: must not be empty when present", i))
 			}
-			if strings.ContainsRune(c.Fix, 0) {
+			if strings.ContainsRune(fix, 0) {
 				problems = append(problems, fmt.Errorf("checks[%d].fix: must not contain a NUL byte", i))
 			}
 		}
@@ -180,12 +273,14 @@ func buildRules(raw *rawPolicy) (policy.Rules, []error) {
 		return rules, nil
 	}
 	var problems []error
-	for i, p := range raw.ProtectedFiles {
+	protected := stringList(raw.ProtectedFiles, "policy.protected_files", &problems)
+	forbidden := stringList(raw.ForbiddenPatterns, "policy.forbidden_patterns", &problems)
+	for i, p := range protected {
 		if err := policy.ValidatePattern(p); err != nil {
 			problems = append(problems, fmt.Errorf("policy.protected_files[%d]: %q: %w", i, p, err))
 		}
 	}
-	for i, p := range raw.ForbiddenPatterns {
+	for i, p := range forbidden {
 		switch {
 		case p == "":
 			problems = append(problems, fmt.Errorf("policy.forbidden_patterns[%d]: must not be empty", i))
@@ -193,8 +288,8 @@ func buildRules(raw *rawPolicy) (policy.Rules, []error) {
 			problems = append(problems, fmt.Errorf("policy.forbidden_patterns[%d]: %q must not contain a newline", i, p))
 		}
 	}
-	rules.ProtectedFiles = raw.ProtectedFiles
-	rules.ForbiddenPatterns = raw.ForbiddenPatterns
+	rules.ProtectedFiles = protected
+	rules.ForbiddenPatterns = forbidden
 
 	setLimit := func(field string, v *int, lowest int, dst *int) {
 		if v == nil {
@@ -210,13 +305,13 @@ func buildRules(raw *rawPolicy) (policy.Rules, []error) {
 	setLimit("max_deleted_lines", raw.MaxDeletedLines, 0, &rules.MaxDeletedLines)
 	setLimit("max_attempts", raw.MaxAttempts, 1, &rules.MaxAttempts)
 
-	if raw.EditScope != nil {
-		switch scope := policy.EditScope(*raw.EditScope); scope {
+	if scope, st := requireString(&raw.EditScope, "policy.edit_scope", false, &problems); st == stringOK {
+		switch es := policy.EditScope(scope); es {
 		case policy.ScopeFilesInErrors, policy.ScopeAny:
-			rules.EditScope = scope
+			rules.EditScope = es
 		default:
 			problems = append(problems, fmt.Errorf("policy.edit_scope: %q must be %q or %q",
-				*raw.EditScope, policy.ScopeFilesInErrors, policy.ScopeAny))
+				scope, policy.ScopeFilesInErrors, policy.ScopeAny))
 		}
 	}
 	return rules, problems
@@ -231,9 +326,5 @@ func LoadRepo(ctx context.Context, path string) (*Repo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	repo, err := ParseRepo(data)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return repo, nil
+	return parseRepo(data, path)
 }

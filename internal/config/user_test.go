@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,8 +43,8 @@ func TestLoadUserEmptyFileIsDefaults(t *testing.T) {
 func TestLoadUserCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := LoadUser(ctx, writeUser(t, "")); err == nil {
-		t.Error("expected context error")
+	if _, err := LoadUser(ctx, writeUser(t, "")); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
 
@@ -85,6 +86,9 @@ func TestLoadUserInvalid(t *testing.T) {
 		{"bad agent", "agent: gemini\n", "claude-code, codex, other"},
 		{"bad delivery", "watch:\n  delivery: email\n", "notify, session, headless"},
 		{"second document", "agent: codex\n---\nagent: other\n", "document"},
+		{"agent is int", "agent: 1\n", "agent: must be a string"},
+		{"delivery is bool", "watch:\n  delivery: true\n", "watch.delivery: must be a string"},
+		{"alias", "agent: &a codex\nwatch:\n  delivery: *a\n", "anchors and aliases are not allowed"},
 		{"malformed", "agent: [\n", "config.yml"},
 		{"oversized", "#" + strings.Repeat("a", maxConfigBytes), "too large"},
 	}
@@ -111,5 +115,20 @@ func TestUserConfigPath(t *testing.T) {
 	}
 	if !filepath.IsAbs(got) || !strings.HasSuffix(got, filepath.Join("regreen", "config.yml")) {
 		t.Errorf("path = %q", got)
+	}
+}
+
+func TestLoadUserNullKeysTakeDefaults(t *testing.T) {
+	got, err := LoadUser(context.Background(), writeUser(t, "agent: ~\nwatch:\n  delivery: ~\n"))
+	if err != nil || *got != DefaultUser() {
+		t.Errorf("got %+v, %v", got, err)
+	}
+}
+
+func TestLoadUserNamesTheFileOnce(t *testing.T) {
+	p := writeUser(t, "agent: [\n")
+	_, err := LoadUser(context.Background(), p)
+	if err == nil || strings.Count(err.Error(), "config.yml") != 1 {
+		t.Errorf("err = %v", err)
 	}
 }

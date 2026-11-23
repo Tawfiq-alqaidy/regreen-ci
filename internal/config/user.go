@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"go.yaml.in/yaml/v4"
 )
 
 // Delivery says how a watch hands a failure to the agent.
@@ -28,12 +30,12 @@ type User struct {
 }
 
 type rawUser struct {
-	Agent *string       `yaml:"agent"`
+	Agent yaml.Node     `yaml:"agent"`
 	Watch *rawUserWatch `yaml:"watch"`
 }
 
 type rawUserWatch struct {
-	Delivery *string `yaml:"delivery"`
+	Delivery yaml.Node `yaml:"delivery"`
 }
 
 // DefaultUser returns the config used when no user config exists.
@@ -66,29 +68,38 @@ func LoadUser(ctx context.Context, path string) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	raw, err := decodeStrict[rawUser](data, "config.yml")
+	raw, err := decodeStrict[rawUser](data, path)
 	if errors.Is(err, errEmptyDocument) {
 		return &u, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, err
 	}
 
-	if raw.Agent != nil {
-		switch *raw.Agent {
+	var problems []error
+	if agent, st := requireString(&raw.Agent, "agent", false, &problems); st == stringOK {
+		switch agent {
 		case "claude-code", "codex", "other":
-			u.Agent = *raw.Agent
+			u.Agent = agent
 		default:
-			return nil, fmt.Errorf("%s: agent: %q must be one of claude-code, codex, other", path, *raw.Agent)
+			problems = append(problems, fmt.Errorf("agent: %q must be one of claude-code, codex, other", agent))
 		}
 	}
-	if raw.Watch != nil && raw.Watch.Delivery != nil {
-		switch d := Delivery(*raw.Watch.Delivery); d {
-		case DeliveryNotify, DeliverySession, DeliveryHeadless:
-			u.Watch.Delivery = d
-		default:
-			return nil, fmt.Errorf("%s: watch.delivery: %q must be one of notify, session, headless", path, d)
+	if raw.Watch != nil {
+		if v, st := requireString(&raw.Watch.Delivery, "watch.delivery", false, &problems); st == stringOK {
+			switch d := Delivery(v); d {
+			case DeliveryNotify, DeliverySession, DeliveryHeadless:
+				u.Watch.Delivery = d
+			default:
+				problems = append(problems, fmt.Errorf("watch.delivery: %q must be one of notify, session, headless", d))
+			}
 		}
+	}
+	if len(problems) > 0 {
+		for i, p := range problems {
+			problems[i] = fmt.Errorf("%s: %w", path, p)
+		}
+		return nil, errors.Join(problems...)
 	}
 	return &u, nil
 }

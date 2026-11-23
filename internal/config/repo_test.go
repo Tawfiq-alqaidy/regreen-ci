@@ -115,6 +115,21 @@ func TestParseRepoInvalid(t *testing.T) {
 		{"second document", minimalRepoYAML + "---\n" + minimalRepoYAML, "document"},
 		{"non-mapping document", "- a\n", "regreen.yml"},
 		{"string where int expected", minimalRepoYAML + "policy:\n  max_attempts: \"two\"\n", "cannot construct"},
+		{"name is int", "checks:\n  - name: 123\n    run: x\n", "checks[0].name: must be a string"},
+		{"run is bool", "checks:\n  - name: a\n    run: true\n", "checks[0].run: must be a string (quote the value)"},
+		{"fix is float", "checks:\n  - name: a\n    run: x\n    fix: 1.5\n", "checks[0].fix: must be a string"},
+		{"forbidden pattern is int", minimalRepoYAML + "policy:\n  forbidden_patterns: [1]\n", "policy.forbidden_patterns[0]: must be a string"},
+		{"protected pattern is bool", minimalRepoYAML + "policy:\n  protected_files: [true]\n", "policy.protected_files[0]: must be a string"},
+		{"edit_scope binary", minimalRepoYAML + "policy:\n  edit_scope: !!binary YW55\n", "policy.edit_scope: must be a string"},
+		{"run is mapping", "checks:\n  - name: a\n    run: {a: b}\n", "checks[0].run: must be a string"},
+		{"null protected element", minimalRepoYAML + "policy:\n  protected_files: [null, \"a\"]\n", "policy.protected_files[0]"},
+		{"null forbidden element", minimalRepoYAML + "policy:\n  forbidden_patterns: [~, eslint-disable]\n", "policy.forbidden_patterns[0]"},
+		{"null name", "checks:\n  - name: ~\n    run: x\n", "checks[0].name"},
+		{"alias list", minimalRepoYAML + "policy:\n  protected_files: &p [a]\n  forbidden_patterns: *p\n", "anchors and aliases are not allowed"},
+		{"merge key", "checks:\n  - &c {name: a, run: x}\n  - <<: *c\n", "anchors and aliases are not allowed"},
+		{"duplicate top-level key", minimalRepoYAML + "checks: []\n", "already defined"},
+		{"duplicate key in check", "checks:\n  - name: a\n    run: x\n    run: y\n", "already defined"},
+		{"duplicate key in policy", minimalRepoYAML + "policy:\n  max_attempts: 1\n  max_attempts: 2\n", "already defined"},
 		{"malformed yaml", "checks: [\n", "regreen.yml"},
 	}
 	for _, tt := range tests {
@@ -218,5 +233,46 @@ func TestLoadRepo(t *testing.T) {
 	cancel()
 	if _, err := LoadRepo(ctx, path); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled ctx err = %v", err)
+	}
+}
+
+func TestParseRepoQuotedScalarsAreStrings(t *testing.T) {
+	y := "checks:\n  - name: a\n    run: \"true\"\n    fix: yes\npolicy:\n  forbidden_patterns: [\"1\", 'x']\n  protected_files:\n    - |-\n      gen\n"
+	repo, err := ParseRepo([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.Checks[0].Run != "true" || repo.Checks[0].Fix != "yes" || repo.Policy.ForbiddenPatterns[0] != "1" {
+		t.Errorf("got %+v", repo)
+	}
+}
+
+func TestParseRepoNullOptionalKeysTakeDefaults(t *testing.T) {
+	y := minimalRepoYAML + "policy:\n  edit_scope: ~\n  max_attempts: ~\n  protected_files: ~\n"
+	repo, err := ParseRepo([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(repo.Policy, policy.DefaultRules()) {
+		t.Errorf("policy = %+v", repo.Policy)
+	}
+}
+
+func TestLoadRepoNamesTheFileOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), RepoFileName)
+	for _, content := range []string{"", "checks: [\n", "cheks: 1\n", "checks: []\n"} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadRepo(context.Background(), path)
+		if err == nil {
+			t.Fatalf("%q: expected error", content)
+		}
+		if strings.Contains(err.Error(), "regreen.yml: ") && strings.Count(err.Error(), "regreen.yml") > 1 {
+			t.Errorf("%q: file named twice: %v", content, err)
+		}
+		if !strings.HasPrefix(err.Error(), path) {
+			t.Errorf("%q: error should start with the path: %v", content, err)
+		}
 	}
 }
