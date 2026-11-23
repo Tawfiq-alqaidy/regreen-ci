@@ -6,12 +6,12 @@ A failing CI is CI doing its job. regreen does not try to make the pipeline gree
 
 ## Status
 
-Early development. Milestone M0 (scaffold) is complete: the binary builds and prints help and its version. Nothing else works yet.
+Early development. Milestone M0 (scaffold) is complete: the binary builds and prints help and its version. Milestone M1 (config loading and the policy engine) is built and waiting for review: the code loads `regreen.yml` and the user config and decides whether a diff follows the rules, but it is a tested library only. No command uses it yet, so the binary still does nothing beyond help and version.
 
 | Milestone | Delivers | State |
 |---|---|---|
 | M0 | Scaffold: module, CLI skeleton, lint, CI, docs | done |
-| M1 | Config loading and the policy engine | planned |
+| M1 | Config loading and the policy engine | done, pending review |
 | M2 | GitHub Actions adapter and the failure model | planned |
 | M3 | MCP server (`regreen mcp`) | planned |
 | M4 | Enforcement: `regreen verify`, `regreen init`, pre-push hook | planned |
@@ -42,8 +42,10 @@ make check          # vet, lint, tests
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Configuration reference](docs/CONFIG.md)
 - [Decisions log](docs/DECISIONS.md)
 - [Milestone M0 summary](docs/milestones/M0.md)
+- [Milestone M1 summary](docs/milestones/M1.md)
 
 ## License
 
