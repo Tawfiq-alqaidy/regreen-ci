@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchPath(t *testing.T) {
 	t.Parallel()
@@ -73,10 +76,36 @@ func TestValidatePattern(t *testing.T) {
 	invalid := []string{
 		"", "  ", "!regreen.yml", `a\b`, "a\x00b", "a\nb", "a/../b", "./a", "a/./b", "..",
 		"a**b", "**a", "a[", "/", "a//b", "//a",
+		" tsconfig.json", "tsconfig.json ", "\ttsconfig.json", "dir/ ", "a\r",
+		"[!a]*.go", "src/[!x]", "a[!b]c",
 	}
 	for _, p := range invalid {
 		if err := ValidatePattern(p); err == nil {
 			t.Errorf("ValidatePattern(%q) = nil, want error", p)
 		}
+	}
+}
+
+func TestValidatePatternMessages(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ pattern, want string }{
+		{"[!a]*.go", "[^...]"},
+		{" a", "whitespace"},
+		{"a ", "whitespace"},
+	}
+	for _, tt := range tests {
+		err := ValidatePattern(tt.pattern)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("ValidatePattern(%q) = %v, want an error mentioning %q", tt.pattern, err, tt.want)
+		}
+	}
+	// A ! that does not open a class is an ordinary character.
+	for _, p := range []string{"a!b", "[a!]"} {
+		if err := ValidatePattern(p); err != nil {
+			t.Errorf("ValidatePattern(%q) = %v, want nil", p, err)
+		}
+	}
+	if !MatchPath("[^a]*.go", "b.go") || MatchPath("[^a]*.go", "a.go") {
+		t.Error("[^a] class does not negate")
 	}
 }

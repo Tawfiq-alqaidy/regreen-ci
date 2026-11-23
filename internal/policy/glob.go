@@ -32,6 +32,14 @@ func parsePattern(pattern string) (parsedPattern, error) {
 	if strings.ContainsAny(pattern, "\\\x00\n") {
 		return parsedPattern{}, errors.New("pattern must not contain a backslash, NUL byte or newline")
 	}
+	if strings.TrimSpace(pattern) != pattern {
+		return parsedPattern{}, errors.New("pattern has leading or trailing whitespace, so it could never match")
+	}
+	if strings.Contains(pattern, "[!") {
+		// path.Match reads [!x] as a class holding '!' and 'x', unlike
+		// gitignore, so the pattern would silently protect the wrong files.
+		return parsedPattern{}, errors.New("character class negation [!...] is not supported: use [^...]")
+	}
 
 	body, anchored := strings.CutPrefix(pattern, "/")
 	body = strings.TrimSuffix(body, "/")
