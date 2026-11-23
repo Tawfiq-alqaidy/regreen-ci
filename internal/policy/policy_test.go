@@ -569,14 +569,16 @@ func TestEvaluateMessagesQuotePaths(t *testing.T) {
 			mod("regreen.yml", 0, "x"),
 			{Path: "b.bin", Binary: true},
 			{Path: "l", Special: "symlink"},
+			{Path: "n.sh", Kind: Added, Special: "executable"},
 		}},
 		Rules:      DefaultRules(),
-		ErrorFiles: []string{"regreen.yml", "b.bin", "l"},
+		ErrorFiles: []string{"regreen.yml", "b.bin", "l", "n.sh"},
 	}
 	want := []string{
 		`"regreen.yml" is always protected (matches "regreen.yml") and cannot be changed`,
 		`"b.bin" is a binary change, which is not allowed`,
 		`"l" is a symlink change, which is not allowed`,
+		`"n.sh" is an executable change, which is not allowed`,
 	}
 	var got []string
 	for _, r := range Evaluate(in).Reasons {
@@ -624,6 +626,7 @@ func TestEvaluateInvalidDiff(t *testing.T) {
 		{"binary with deleted lines", Diff{Files: []FileChange{{Path: "a.ts", Binary: true, Deleted: 1}}}, []string{RuleInvalidDiff}},
 		{"unknown kind", Diff{Files: []FileChange{{Path: "a.ts", Kind: ChangeKind(7)}}}, []string{RuleInvalidDiff}},
 		{"negative kind", Diff{Files: []FileChange{{Path: "a.ts", Kind: ChangeKind(-1)}}}, []string{RuleInvalidDiff}},
+		{"unknown special kind", Diff{Files: []FileChange{{Path: "a.ts", Special: "weird\n::error::forged"}}}, []string{RuleInvalidDiff}},
 		{"duplicate path flagged on second", Diff{Files: []FileChange{mod("a.ts", 0, "x"), mod("a.ts", 0, "bad")}}, []string{RuleInvalidDiff}},
 	}
 	for _, tt := range tests {

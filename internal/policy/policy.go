@@ -234,13 +234,20 @@ func checkFile(f FileChange, rules Rules, named map[string]bool, duplicate bool)
 		})
 	}
 	if f.Special != "" {
+		article := "a"
+		if strings.ContainsRune("aeiou", rune(f.Special[0])) {
+			article = "an"
+		}
 		reasons = append(reasons, Reason{
 			Rule: RuleSpecialFile, File: f.Path,
-			Message: fmt.Sprintf("%q is a %s change, which is not allowed", f.Path, f.Special),
+			Message: fmt.Sprintf("%q is %s %s change, which is not allowed", f.Path, article, f.Special),
 		})
 	}
 	return append(reasons, forbiddenReasons(f, rules.ForbiddenPatterns)...)
 }
+
+// specialKinds are the FileChange.Special values the parser produces.
+var specialKinds = []string{"", "mode change", "symlink", "submodule", "executable"}
 
 // diffProblem describes why a FileChange cannot come from a real git diff, or
 // returns "" when it is well formed.
@@ -254,6 +261,8 @@ func diffProblem(f FileChange, duplicate bool) string {
 		return fmt.Sprintf("negative deleted line count %d", f.Deleted)
 	case f.Binary && (len(f.Added) > 0 || f.Deleted > 0):
 		return "a binary change cannot have line counts"
+	case !slices.Contains(specialKinds, f.Special):
+		return fmt.Sprintf("unknown special kind %q", f.Special)
 	}
 	for _, l := range f.Added {
 		if l.Number < 1 {
