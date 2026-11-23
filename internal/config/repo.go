@@ -101,17 +101,42 @@ func requireString(n *yaml.Node, path string, nullIsBad bool, problems *[]error)
 	return v, st
 }
 
-// stringList converts a list of nodes, reporting non-strings and nulls with
-// their indexed path.
-func stringList(nodes []yaml.Node, path string, problems *[]error) []string {
+// stringList converts a list of nodes, reporting non-strings, nulls and any
+// problem check finds in a string. Every problem names the element's index in
+// the file's own list, so a bad earlier element cannot shift later indexes.
+func stringList(nodes []yaml.Node, path string, check func(string) error, problems *[]error) []string {
 	var out []string
 	for i := range nodes {
-		v, st := requireString(&nodes[i], fmt.Sprintf("%s[%d]", path, i), true, problems)
-		if st == stringOK {
-			out = append(out, v)
+		at := fmt.Sprintf("%s[%d]", path, i)
+		v, st := requireString(&nodes[i], at, true, problems)
+		if st != stringOK {
+			continue
 		}
+		if err := check(v); err != nil {
+			*problems = append(*problems, fmt.Errorf("%s: %w", at, err))
+		}
+		out = append(out, v)
 	}
 	return out
+}
+
+// checkProtectedPattern validates one protected_files entry.
+func checkProtectedPattern(p string) error {
+	if err := policy.ValidatePattern(p); err != nil {
+		return fmt.Errorf("%q: %w", p, err)
+	}
+	return nil
+}
+
+// checkForbiddenPattern validates one forbidden_patterns entry.
+func checkForbiddenPattern(p string) error {
+	switch {
+	case p == "":
+		return errors.New("must not be empty")
+	case strings.ContainsAny(p, "\r\n"):
+		return fmt.Errorf("%q must not contain a newline", p)
+	}
+	return nil
 }
 
 // rejectAnchors reports any anchor, alias, or merge key in the node tree.
@@ -273,23 +298,8 @@ func buildRules(raw *rawPolicy) (policy.Rules, []error) {
 		return rules, nil
 	}
 	var problems []error
-	protected := stringList(raw.ProtectedFiles, "policy.protected_files", &problems)
-	forbidden := stringList(raw.ForbiddenPatterns, "policy.forbidden_patterns", &problems)
-	for i, p := range protected {
-		if err := policy.ValidatePattern(p); err != nil {
-			problems = append(problems, fmt.Errorf("policy.protected_files[%d]: %q: %w", i, p, err))
-		}
-	}
-	for i, p := range forbidden {
-		switch {
-		case p == "":
-			problems = append(problems, fmt.Errorf("policy.forbidden_patterns[%d]: must not be empty", i))
-		case strings.ContainsAny(p, "\r\n"):
-			problems = append(problems, fmt.Errorf("policy.forbidden_patterns[%d]: %q must not contain a newline", i, p))
-		}
-	}
-	rules.ProtectedFiles = protected
-	rules.ForbiddenPatterns = forbidden
+	rules.ProtectedFiles = stringList(raw.ProtectedFiles, "policy.protected_files", checkProtectedPattern, &problems)
+	rules.ForbiddenPatterns = stringList(raw.ForbiddenPatterns, "policy.forbidden_patterns", checkForbiddenPattern, &problems)
 
 	setLimit := func(field string, v *int, lowest int, dst *int) {
 		if v == nil {

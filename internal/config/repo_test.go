@@ -280,3 +280,36 @@ func TestLoadRepoNamesTheFileOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRepoReportsIndexInTheFilesOwnList(t *testing.T) {
+	tests := []struct {
+		name string
+		list string
+		want []string
+	}{
+		{"null then unclean protected pattern", "protected_files: [null, \"a//b\"]",
+			[]string{"policy.protected_files[0]: must be a string", `policy.protected_files[1]: "a//b"`}},
+		{"int then negated protected pattern", "protected_files: [1, \"!x\"]",
+			[]string{"policy.protected_files[0]: must be a string", `policy.protected_files[1]: "!x"`}},
+		{"null then empty forbidden pattern", "forbidden_patterns: [~, \"\"]",
+			[]string{"policy.forbidden_patterns[0]: must be a string", "policy.forbidden_patterns[1]: must not be empty"}},
+		{"int then newline forbidden pattern", "forbidden_patterns: [1, \"a\\nb\"]",
+			[]string{"policy.forbidden_patterns[0]: must be a string", `policy.forbidden_patterns[1]: "a\nb"`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseRepo([]byte(minimalRepoYAML + "policy:\n  " + tt.list + "\n"))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not contain %q", err, w)
+				}
+			}
+			if strings.Contains(err.Error(), "[0]: \"") {
+				t.Errorf("a pattern problem was reported at index 0: %q", err)
+			}
+		})
+	}
+}
