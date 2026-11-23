@@ -104,6 +104,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Regular expressions; literal by default with an opt-in `re:` prefix for regular expressions.
 - **Why:** Chosen by the maintainer. Literals cannot be written wrongly in a way that silently matches nothing, they cannot hang the matcher, and they are easy to explain. Checking only added lines means the rule says "do not introduce this", so removing an existing suppression comment is always allowed, which is what a fix for a lint error often needs.
 - **Cost if wrong:** Literals are easy to evade by rewording (for example a linter's second suppression syntax), and case differences are not matched. The documents say so, and human review before merge remains part of the design. Adding an opt-in `re:` prefix later would not break existing configs.
+- **Updated by D27:** adding a `re:` prefix later would need a migration, not come for free: an existing literal pattern that already starts with `re:` would change meaning.
 
 ## D15. `protected_files` use gitignore-style patterns and an in-repo matcher
 
@@ -112,6 +113,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** A third-party gitignore library; plain `path.Match` globs (no `**`, no directory coverage); plain prefixes.
 - **Why:** Chosen by the maintainer. People already know gitignore patterns. Writing the matcher in this package keeps the engine free of dependencies and lets the same code validate patterns (`ValidatePattern`) and match them (`MatchPath`), so the two cannot disagree. Rejecting negation closes a way to weaken the always-protected list.
 - **Cost if wrong:** The matcher supports a subset of gitignore. Patterns gitignore accepts but this does not (such as a backslash escape) are rejected with an error, not silently misread.
+- **Updated by D25 and D27:** the matcher now runs in quadratic time (D25), and patterns with leading or trailing whitespace or a `[!` class are rejected (D27).
 
 ## D16. The always-protected list
 
@@ -120,6 +122,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Only the three paths the brief names; make the list configurable.
 - **Why:** A configurable safety list could be edited away by the same agent it constrains. Case-insensitive matching covers case-insensitive file systems (macOS and Windows by default), where `.GitHub/workflows/ci.yml` is the same file as `.github/workflows/ci.yml`.
 - **Cost if wrong:** A legitimate fix that must change one of these files is always rejected, and a human must make it. Hook tools not on the list (for example a different hook manager) are not protected until they are added.
+- **Updated by D26:** `.gitmodules` is added to the list. Also, `Evaluate` applies the list whenever it judges a diff, not literally on every call: with invalid rules it rejects the diff before checking any path.
 
 ## D17. The diff parser lives in `internal/policy`, built in M1
 
@@ -136,6 +139,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Allow them and count them as zero lines; allow them under configuration.
 - **Why:** The engine reasons about lines of text. A binary file has no lines to count, so it would bypass the line limits and the forbidden patterns. A symlink or a submodule pointer can redirect a path to somewhere the rules never looked, and a mode change (for example making a file executable) is not a line change either. Fail closed: what the engine cannot measure, it does not allow.
 - **Cost if wrong:** A fix that regenerates a binary asset, or makes a script executable, is always rejected and needs a human.
+- **Updated by D28:** a new file with mode 100755 is also rejected as `special_file`.
 
 ## D19. Attempts are an input number, not state
 
@@ -160,6 +164,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Trust callers and document the preconditions; skip an invalid `protected_files` pattern when matching (what `IsProtected` still does).
 - **Why:** The first version skipped a pattern it could not read, which silently removed that protection: a typo in a protected pattern let the file through. A negative deletion count could offset another file's deletions in the totals. Making the engine reject what it cannot interpret removes the dependence on every caller being correct.
 - **Cost if wrong:** A caller that builds `Rules` by hand with a zero value fails with `invalid_rules` instead of getting a default; it should start from `DefaultRules()`.
+- **Updated by D25 and D27:** `invalid_path` also covers control characters, invalid UTF-8 and the path limits (D25); `invalid_rules` also covers a forbidden pattern containing a newline (D27); `invalid_diff` also covers an unknown `Special` value (D25).
 
 ## D22. How the parser reads git's output
 
@@ -168,6 +173,7 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Read the mode only from the explicit mode lines; accept sections it does not understand and skip them.
 - **Why:** Re-pointing an existing symlink produces a patch with no mode line other than `index ... 120000`, so without reading the index mode it would look like an ordinary one-line text edit. Skipping an unrecognized section would let a change hide in it.
 - **Cost if wrong:** A type change or a backslash in a path is a parse error, so the fix is rejected even if it was harmless. A parse error must be treated as a rejection by the caller. If M3 forgets to pin the git settings above, `regreen` fails closed on machines that set them.
+- **Updated by D28 and D29:** mode lines accept only four modes and backslash lines only the exact marker (D28); the git command gains `--ignore-submodules=none`, and some settings omit changes rather than change the format (D29).
 
 ## D23. Config strings must be real YAML strings; no anchors, aliases or merge keys
 
@@ -184,3 +190,51 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Treat `a//b` as `a/b`.
 - **Why:** A pattern with a doubled slash is almost always a typo, and quietly guessing what it means could leave a path unprotected. An error costs the user one edit.
 - **Cost if wrong:** A pattern some tool generated with a doubled slash must be corrected by hand.
+
+## D25. A quadratic path matcher, path limits and quoted messages
+
+- **Date:** 2026-11-24 (M1, final review)
+- **Decision:** `MatchPath` matches by dynamic programming over (pattern segments) x (path segments), collapsing runs of `**` and answering the "whole path or any leading directory" rule from the table's last row instead of looping over prefixes. One function, `checkRepoPath`, checks paths for both the parser and `Evaluate`; besides the earlier rules it rejects bytes below 0x20 and DEL, invalid UTF-8, paths over 4096 bytes and paths with more than 255 segments. Every path and pattern in a `Reason.Message` is printed with `%q`, and a `FileChange.Special` value the parser never produces is `invalid_diff`.
+- **Alternatives:** Keep the recursive matcher and cap the number of `**` segments; strip or escape control characters instead of rejecting them.
+- **Why:** The recursive matcher backtracked over each `**` and retried every prefix: one pattern from review took 1.67 s on a path of 100 repeated `test/fixtures/` segments, and eight `**` against 40 segments did not finish. The path is chosen by the agent, so that was a way to stall the check. A file name with a newline or an ESC sequence was printed raw and could forge CI log lines. Two copies of the path check had already drifted once. The old matcher is kept in the tests as a reference and compared with the new one on 5000 random pairs.
+- **Cost if wrong:** A legitimate path with a control character, non-UTF-8 bytes (for example a Latin-1 file name, which git prints as octal escapes), more than 4096 bytes or more than 255 segments is a parse error, so a fix touching it needs a human.
+
+## D26. `.gitmodules` is always protected
+
+- **Date:** 2026-11-24 (M1, final review)
+- **Decision:** `.gitmodules` joins the always-protected list (D16), matched case-insensitively at any depth like the others.
+- **Alternatives:** Leave it to `protected_files`; rely on rejecting submodule changes (D18).
+- **Why:** `.gitmodules` sets submodule URLs, and `ignore = all` in it makes `git diff` leave submodule changes out entirely, so a diff that edits it can hide a later change from the engine (checked in a throwaway repository). Rejecting submodule changes does not help with a change git never prints. This extends the brief's hardcoded list (section 3 names `regreen.yml`, `.github/**`, `.regreen/**` and git hooks); the maintainer can revisit it.
+- **Cost if wrong:** A legitimate fix that must change `.gitmodules` is always rejected and needs a human.
+
+## D27. Patterns that can never match, or match the wrong thing, are rejected
+
+- **Date:** 2026-11-24 (M1, final review)
+- **Decision:** `ValidatePattern` rejects a `protected_files` pattern with leading or trailing whitespace, and any pattern containing `[!`, with a message that says to use `[^...]`. `Evaluate` reports a forbidden pattern containing a newline as `invalid_rules` (the config loader already rejected it).
+- **Alternatives:** Trim whitespace; translate `[!` to `[^` as gitignore would.
+- **Why:** A pattern with edge whitespace validated but could never match a path, so it protected nothing. Go's `path.Match` reads `[!x]` as a class containing `!` and `x`, unlike gitignore, so `[!a]*.go` would protect the wrong files without any error. Silently translating would mean two syntaxes for one thing; an error costs one edit. A forbidden pattern with a newline can never match an added line, which never contains one.
+- **Cost if wrong:** A pattern copied from a `.gitignore` that uses `[!...]` must be rewritten with `[^...]`.
+
+## D28. New executable files are rejected; only known modes and markers parse
+
+- **Date:** 2026-11-24 (M1, final review)
+- **Decision:** A new file with mode 100755 gets `Special = "executable"` and is rejected as `special_file`. Modifying or deleting an existing executable file (100755 on the `index` or `deleted file mode` line) stays allowed and is not special. Mode and `index` lines accept only 100644, 100755, 120000 and 160000. Inside a hunk, a backslash line is accepted only if it is exactly `\ No newline at end of file`. A hunk that removes lines must start at old line 1 or later.
+- **Alternatives:** Accept any six-digit octal mode; allow new executables and let the checks catch problems.
+- **Why:** Before this, `new file mode 040000` parsed as an ordinary added file. A new executable is a new thing that can be run (a script a hook or a build step could pick up), which D18 already treats as outside a mechanical fix when it arrives as a mode change; a new file should not be a way around that. Editing an existing script's content is an ordinary text change and stays allowed. Unknown backslash lines and impossible hunk positions are not something git emits.
+- **Cost if wrong:** A fix that has to add an executable script needs a human.
+
+## D29. The git command includes `--ignore-submodules=none`
+
+- **Date:** 2026-11-24 (M1, final review)
+- **Decision:** The documented command is `git -c core.quotepath=off diff --no-color --no-ext-diff --no-textconv --no-renames --ignore-submodules=none <base> <head>`, and `docs/ARCHITECTURE.md` carries a git invocation checklist for M3 and M4: run from the root with `--no-relative`, pin the format settings with `-c` and the prefixes with `--src-prefix=a/ --dst-prefix=b/`, treat `.git/config` and `.gitmodules` as hostile, cap the output size, and consider `git diff-tree -r -p`.
+- **Alternatives:** Pin only the settings that change the output format (D22).
+- **Why:** D22 assumed a wrong git setting would change the format, which the parser rejects. Some settings instead make git omit changes: `submodule.<name>.ignore`, `diff.ignoreSubmodules` and `.gitmodules` `ignore = all` hide submodule pointer changes, and `diff.relative` hides changes outside the current directory. The parser cannot detect a change git never printed, so the caller must override these with command-line flags. The agent can write `.git/config` in its checkout without it ever appearing in a diff. The brief asked to pin the prefixes with `-c`; git 2.39.5, on which the checklist was checked, documents no config key for them, so the checklist uses the command-line flags.
+- **Cost if wrong:** If M3 misses a setting that omits changes, the engine judges an incomplete diff and fails open for that change. The checklist is the guard until M3 has tests that run real git with hostile configuration.
+
+## D30. For M2: `ErrorFiles` is the one input that widens what the agent may touch
+
+- **Date:** 2026-11-24 (M1, final review; a constraint on M2, nothing built)
+- **Decision:** M2 should derive `ErrorFiles` from the original failure (the CI run on the commit before any regreen attempt), or intersect it with the files that existed at the base commit.
+- **Alternatives:** Extract `ErrorFiles` from the latest CI log on every attempt.
+- **Why:** Under `edit_scope: files_in_errors`, `ErrorFiles` is the only input that adds files the agent may edit; the rules (read from the base branch in M4) and the diff cannot. From the second attempt on, the CI log comes from a run of the agent's own pushed commit, so the agent can influence which files the log names (for example by adding a file whose name, or whose errors, then appear in the log) and so widen its own scope.
+- **Cost if wrong:** Taking the names only from the first failure means a second attempt cannot fix an error the first attempt revealed in another file; that needs a human or a new run.
