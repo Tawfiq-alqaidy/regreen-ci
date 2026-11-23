@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -9,8 +10,11 @@ import (
 const (
 	gitHeaderPrefix = "diff --git "
 	devNull         = "/dev/null"
+	modeRegular     = "100644"
+	modeExecutable  = "100755"
 	modeSymlink     = "120000"
 	modeSubmodule   = "160000"
+	noNewlineMarker = `\ No newline at end of file`
 	maxNumberDigits = 9
 )
 
@@ -282,16 +286,14 @@ func headerName(value string) (string, error) {
 	return strings.TrimSuffix(value, "\t"), nil
 }
 
+// validMode accepts only the modes git records for blobs, symlinks and
+// submodules. Anything else (a tree, an uncanonical permission) is an error.
 func validMode(mode string) bool {
-	if len(mode) != 6 {
-		return false
+	switch mode {
+	case modeRegular, modeExecutable, modeSymlink, modeSubmodule:
+		return true
 	}
-	for i := 0; i < len(mode); i++ {
-		if mode[i] < '0' || mode[i] > '7' {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 // resolve combines the "diff --git" path and the header lines into a
@@ -363,11 +365,15 @@ func (p *parser) fileLinesPath(h fileHeader) (string, error) {
 }
 
 // special reports the special kind of change, symlink and submodule taking
-// precedence over a plain mode change.
+// precedence over a plain mode change. A new file with mode 100755 is
+// "executable"; changing or deleting an existing executable is not special.
 func special(h fileHeader) string {
 	result := ""
 	if h.oldMode != "" {
 		result = "mode change"
+	}
+	if h.newFile && slices.Contains(h.modes, modeExecutable) {
+		result = "executable"
 	}
 	for _, m := range h.modes {
 		if m == modeSymlink && result != "submodule" {
@@ -483,6 +489,9 @@ func (p *parser) hunk(fc *FileChange, span *hunkSpan) error {
 	if newCount > 0 && newStart < 1 {
 		return p.errf(headerIdx, "hunk adds lines starting at line %d", newStart)
 	}
+	if oldCount > 0 && oldStart < 1 {
+		return p.errf(headerIdx, "hunk removes lines starting at line %d", oldStart)
+	}
 	p.pos++
 	number := newStart
 	for oldCount > 0 || newCount > 0 {
@@ -515,12 +524,15 @@ func (p *parser) hunk(fc *FileChange, span *hunkSpan) error {
 			fc.Added = append(fc.Added, Line{Number: number, Text: line[1:]})
 			number++
 		case '\\':
+			if line != noNewlineMarker {
+				return p.errf(p.pos, "unexpected line inside a hunk: %q", clip(line))
+			}
 		default:
 			return p.errf(p.pos, "unexpected line inside a hunk: %q", clip(line))
 		}
 		p.pos++
 	}
-	for p.pos < len(p.lines) && strings.HasPrefix(p.lines[p.pos], `\`) {
+	for p.pos < len(p.lines) && p.lines[p.pos] == noNewlineMarker {
 		p.pos++
 	}
 	return nil

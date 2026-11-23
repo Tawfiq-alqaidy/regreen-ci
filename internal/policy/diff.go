@@ -27,7 +27,7 @@ func (k ChangeKind) String() string {
 // Line is one line added by a diff.
 type Line struct {
 	Number int    // line number in the new version of the file, starting at 1
-	Text   string // content without the leading '+' and without the line ending
+	Text   string // content without the leading '+' and without the trailing \n (a CR before it is kept)
 }
 
 // FileChange is the change to one file.
@@ -37,7 +37,7 @@ type FileChange struct {
 	Added   []Line // lines added, in order
 	Deleted int    // number of lines removed
 	Binary  bool   // git reported a binary change; Added and Deleted are empty
-	Special string // "", or one of "mode change", "symlink", "submodule"
+	Special string // "", or one of "mode change", "symlink", "submodule", "executable" (a new file with mode 100755)
 }
 
 // Diff is a set of file changes, in the order the patch lists them.

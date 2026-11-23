@@ -2,6 +2,7 @@ package policy
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -194,6 +195,95 @@ func TestParseRejectsOddSections(t *testing.T) {
 		{"zero-count inserts at same point", hdr + "@@ -5,0 +6 @@\n+a\n@@ -5,0 +7 @@\n+b\n"},
 		{"new file hunk removes a line", "diff --git a/x b/x\nnew file mode 100644\n--- /dev/null\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
 		{"deleted file hunk adds a line", "diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +1 @@\n-a\n+b\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseUnifiedDiff(tt.patch)
+			if err == nil {
+				t.Fatalf("ParseUnifiedDiff() = %#v, want error", got)
+			}
+			if !strings.Contains(err.Error(), "line ") {
+				t.Fatalf("error %q does not name a line", err)
+			}
+		})
+	}
+}
+
+// realExecutables is verbatim output of the documented git command for a
+// commit that deletes an executable, adds a new one and modifies a third.
+const realExecutables = `diff --git a/gone.sh b/gone.sh
+deleted file mode 100755
+index a370002..0000000
+--- a/gone.sh
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-echo gone
+diff --git a/new.sh b/new.sh
+new file mode 100755
+index 0000000..4163036
+--- /dev/null
++++ b/new.sh
+@@ -0,0 +1,2 @@
++#!/bin/sh
++echo hi
+diff --git a/run.sh b/run.sh
+index 4ea150a..05cfd7f 100755
+--- a/run.sh
++++ b/run.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo old
++echo new
+`
+
+func TestParseExecutables(t *testing.T) {
+	t.Parallel()
+	d, err := ParseUnifiedDiff(realExecutables)
+	if err != nil {
+		t.Fatalf("ParseUnifiedDiff() error = %v", err)
+	}
+	want := []FileChange{
+		{Path: "gone.sh", Kind: Deleted, Deleted: 2},
+		{Path: "new.sh", Kind: Added, Special: "executable", Added: []Line{{1, "#!/bin/sh"}, {2, "echo hi"}}},
+		{Path: "run.sh", Kind: Modified, Deleted: 1, Added: []Line{{2, "echo new"}}},
+	}
+	if !reflect.DeepEqual(d.Files, want) {
+		t.Fatalf("got\n%#v\nwant\n%#v", d.Files, want)
+	}
+
+	v := Evaluate(Input{Diff: d, Rules: rulesWith(func(r *Rules) { r.EditScope = ScopeAny })})
+	if got := ruleNames(v); !slices.Equal(got, []string{RuleSpecialFile}) || v.Reasons[0].File != "new.sh" {
+		t.Fatalf("reasons = %+v, want one special_file for new.sh", v.Reasons)
+	}
+
+	empty, err := ParseUnifiedDiff("diff --git a/e.sh b/e.sh\nnew file mode 100755\nindex 0000000..e69de29\n")
+	if err != nil || len(empty.Files) != 1 || empty.Files[0].Special != "executable" {
+		t.Fatalf("new empty executable = %#v, %v; want Special executable", empty.Files, err)
+	}
+}
+
+func TestParseRejectsStrictnessViolations(t *testing.T) {
+	t.Parallel()
+	const hdr = "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
+	tests := []struct {
+		name  string
+		patch string
+	}{
+		{"backslash line other than the marker inside a hunk", hdr + "@@ -1,2 +1,2 @@\n a\n\\ hello\n-b\n+c\n"},
+		{"backslash line other than the marker after a hunk", hdr + "@@ -1 +1 @@\n-a\n+b\n\\ hello\n"},
+		{"marker with trailing text", hdr + "@@ -1 +1 @@\n-a\n\\ No newline at end of file!\n+b\n"},
+		{"bare backslash", hdr + "@@ -1 +1 @@\n-a\n+b\n\\\n"},
+		{"new file mode tree", "diff --git a/x b/x\nnew file mode 040000\nindex 0000000..1111111\n"},
+		{"new file mode group writable", "diff --git a/x b/x\nnew file mode 100664\nindex 0000000..1111111\n"},
+		{"deleted file mode odd", "diff --git a/x b/x\ndeleted file mode 100600\nindex 1111111..0000000\n"},
+		{"old mode odd", "diff --git a/x b/x\nold mode 100644\nnew mode 100777\n"},
+		{"new mode tree", "diff --git a/x b/x\nold mode 100644\nnew mode 040000\n"},
+		{"index mode tree", "diff --git a/x b/x\nindex 1111111..2222222 040000\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
+		{"index mode zero", "diff --git a/x b/x\nindex 1111111..2222222 000000\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
+		{"old start zero with lines", hdr + "@@ -0,1 +1 @@\n-a\n+b\n"},
+		{"old start zero, omitted count", hdr + "@@ -0 +1 @@\n-a\n+b\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
