@@ -32,6 +32,9 @@ Flags:
   --version    Print the regreen version
 `
 
+// readBuildInfo is a variable so tests can replace it with a fake.
+var readBuildInfo = debug.ReadBuildInfo
+
 // plannedCommands maps each command that is designed but not built yet to
 // the milestone that delivers it. Entries move out of this map as the
 // milestones land.
@@ -58,7 +61,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprint(stdout, usage)
 		return exitOK
 	case "version", "--version":
-		_, _ = fmt.Fprintf(stdout, "regreen %s\n", resolveVersion(version, debug.ReadBuildInfo))
+		_, _ = fmt.Fprintf(stdout, "regreen %s\n", resolveVersion(version, readBuildInfo))
 		return exitOK
 	default:
 		if milestone, ok := plannedCommands[cmd]; ok {

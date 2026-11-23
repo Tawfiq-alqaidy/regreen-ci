@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
 
 func TestRun(t *testing.T) {
+	// Make the version output independent of how the toolchain stamps the test binary.
+	orig := readBuildInfo
+	readBuildInfo = func() (*debug.BuildInfo, bool) { return nil, false }
+	t.Cleanup(func() { readBuildInfo = orig })
+
 	tests := []struct {
 		name        string
 		args        []string
