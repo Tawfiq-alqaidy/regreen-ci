@@ -194,7 +194,7 @@ func (p *Provider) downloadLog(ctx context.Context, repo ci.Repo, jobID int64) (
 	}
 	body, cut, err := readTail(res.Body, maxLogBytes)
 	if err != nil {
-		return "", false, fmt.Errorf("read log of job %d: %w", jobID, err)
+		return "", false, fmt.Errorf("read log of job %d: %w", jobID, downloadCause(err))
 	}
 	return string(body), cut, nil
 }

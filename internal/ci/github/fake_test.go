@@ -112,6 +112,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	mux.HandleFunc("GET /slow", f.serveSlow)
 	mux.HandleFunc("GET /chain/{n}/{id}", f.serveChain)
 	mux.HandleFunc("GET /redirect", f.serveRedirect)
+	mux.HandleFunc("GET /short", serveShort)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, fakeRequest{r.URL.Path, r.URL.Query(), r.Header.Get("Authorization")})
@@ -266,6 +267,12 @@ func (f *fakeGitHub) serveChain(w http.ResponseWriter, r *http.Request) {
 func (f *fakeGitHub) serveRedirect(w http.ResponseWriter, r *http.Request) {
 	w.Header()["Location"] = []string{r.URL.Query().Get("to")}
 	w.WriteHeader(http.StatusFound)
+}
+
+// serveShort promises a longer body than it sends, so reading it fails.
+func serveShort(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Length", "1000")
+	_, _ = w.Write([]byte("partial line\n"))
 }
 
 // serveSlow announces itself on slowHit, then holds the request open until

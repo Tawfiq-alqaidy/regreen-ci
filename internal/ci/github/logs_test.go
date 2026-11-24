@@ -718,6 +718,15 @@ func TestFailureLogDownloadRedirects(t *testing.T) {
 // TestFailureLogMissingLocation covers a log location that is absent or not
 // an absolute URL with a host. A relative one must not be resolved against
 // the API base and fetched from there.
+func TestFailureLogBodyReadErrorIsFixedText(t *testing.T) {
+	f, p := lintFake(t)
+	logsAt(f, "/short?sig=SECRETSIG")
+	_, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
+	if err == nil || err.Error() != "read log of job 7001: download failed" {
+		t.Fatalf("err = %v, want the fixed read error", err)
+	}
+}
+
 func TestFailureLogMissingLocation(t *testing.T) {
 	tests := []struct {
 		name  string
