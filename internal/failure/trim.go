@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 )
 
+// lineCutMarker is appended to a line cut by MaxLineBytes. It is 14 bytes.
 const lineCutMarker = " …[line cut]"
 
 // TrimLog sanitizes and caps untrusted text, keeping the tail. It replaces
@@ -33,14 +34,7 @@ func TrimLog(raw string, lim Limits) (text string, truncated bool) {
 	}
 	tail := lines[len(lines)-keep:]
 	if len(tail) == 1 && len(tail[0]) > lim.MaxBytes {
-		full := tail[0]
-		tail[0] = cutRunes(full, lim.MaxBytes)
-		if tail[0] == "" {
-			// Not even one rune fits; keep it anyway so the output of
-			// non-empty input is never empty.
-			_, size := utf8.DecodeRuneInString(full)
-			tail[0] = full[:size]
-		}
+		tail[0] = cutLastLine(tail[0], lim.MaxBytes)
 		truncated = true
 	}
 	out := strings.Join(tail, "\n")
@@ -68,10 +62,14 @@ func withDefaults(lim Limits) Limits {
 }
 
 // sanitize applies rules 1-3: valid UTF-8, \n line endings, and no escape
-// sequences, control characters or bidirectional overrides.
+// sequences, control characters or invisible format characters (category Cf,
+// which includes the bidirectional overrides, zero-width characters and tags).
 func sanitize(raw string) string {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	raw = strings.ReplaceAll(raw, "\r", "\n")
+	// Unicode line separators would forge line breaks in text shown to a
+	// reader or agent; make them real ones so the line limits count them.
+	raw = strings.NewReplacer("\u2028", "\n", "\u2029", "\n", "\u0085", "\n").Replace(raw)
 	var b strings.Builder
 	b.Grow(len(raw))
 	for i := 0; i < len(raw); {
@@ -85,7 +83,7 @@ func sanitize(raw string) string {
 		case r == '\n' || r == '\t':
 			b.WriteRune(r)
 			i += size
-		case unicode.IsControl(r), isBidiControl(r):
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			i += size
 		default:
 			b.WriteString(raw[i : i+size])
@@ -128,10 +126,6 @@ func skipEscape(s string) int {
 		return len(s)
 	}
 	return 0
-}
-
-func isBidiControl(r rune) bool {
-	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
 
 func splitLines(s string) []string { return strings.Split(s, "\n") }
@@ -187,4 +181,23 @@ func tailThatFits(lines []string, lim Limits) int {
 		size += add
 	}
 	return keep
+}
+
+// cutLastLine cuts the one kept line to at most n bytes at a rune boundary
+// (the line-cut marker is dropped whole rather than left partial) and trims
+// trailing blanks. When nothing but blanks would remain it keeps the line's
+// first non-blank rune, so the output of non-empty input is never empty; that
+// one rune may exceed n.
+func cutLastLine(line string, n int) string {
+	cut := cutRunes(line, n)
+	if content, ok := strings.CutSuffix(line, lineCutMarker); ok && len(cut) > len(content) {
+		cut = content
+	}
+	cut = strings.TrimRight(cut, " \t")
+	if cut != "" {
+		return cut
+	}
+	rest := strings.TrimLeft(line, " \t")
+	_, size := utf8.DecodeRuneInString(rest)
+	return rest[:size]
 }

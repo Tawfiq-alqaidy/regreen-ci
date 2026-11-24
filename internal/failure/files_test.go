@@ -74,3 +74,44 @@ func TestExtractFilesDefaultMax(t *testing.T) {
 		t.Fatalf("len = %d, want %d", len(got), DefaultLimits().MaxFiles)
 	}
 }
+
+func TestExtractFilesIgnoresFragmentBeforeLineCut(t *testing.T) {
+	known := map[string]struct{}{"config.js": {}, "config.json": {}}
+	long := strings.Repeat("x", 1990) + " config.json"
+	text, trunc := TrimLog(long, Limits{})
+	if !trunc || !strings.HasSuffix(text, lineCutMarker) {
+		t.Fatalf("setup: expected a cut line, got truncated=%v", trunc)
+	}
+	if got := ExtractFiles(text, known, 0); got != nil {
+		t.Fatalf("fragment matched: %v", got)
+	}
+	// A complete token before the fragment still counts, and so does one
+	// on an uncut line.
+	known["a.go"] = struct{}{}
+	got := ExtractFiles("a.go "+text+"\nconfig.js", known, 0)
+	if !reflect.DeepEqual(got, []string{"a.go", "config.js"}) {
+		t.Fatalf("got %v", got)
+	}
+	// A cut that ends after a delimiter leaves the last token complete.
+	if got := ExtractFiles("config.js"+" "+lineCutMarker[1:], known, 0); got != nil {
+		t.Fatalf("marker without leading space is plain text: %v", got)
+	}
+	if got := ExtractFiles("config.js "+lineCutMarker, known, 0); !reflect.DeepEqual(got, []string{"config.js"}) {
+		t.Fatalf("complete token before a cut: %v", got)
+	}
+}
+
+func TestExtractFilesSlashRunsAreCheap(t *testing.T) {
+	tok := strings.Repeat("/", 4000) + "src/a.ts"
+	text := strings.Repeat(tok+" "+strings.Repeat("a:1", 1300)+" ", 10<<20/(len(tok)+4000))
+	if got := ExtractFiles(text, knownSet(), 0); !reflect.DeepEqual(got, []string{"src/a.ts"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestExtractFilesSuffixLimitedByLongestKnown(t *testing.T) {
+	known := map[string]struct{}{"a/b.go": {}}
+	if got := ExtractFiles("/r/w/a/b.go", known, 0); !reflect.DeepEqual(got, []string{"a/b.go"}) {
+		t.Fatalf("got %v", got)
+	}
+}

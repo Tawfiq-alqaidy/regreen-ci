@@ -16,7 +16,7 @@ func FuzzTrimLog(f *testing.F) {
 	f.Add("\x1b]0;x\x1b", 3, 10, 5)
 	f.Fuzz(func(t *testing.T, in string, maxLines, maxBytes, maxLineBytes int) {
 		lim := Limits{MaxLines: maxLines % 50, MaxBytes: maxBytes % 500, MaxLineBytes: maxLineBytes % 200}
-		got, _ := TrimLog(in, lim)
+		got, truncated := TrimLog(in, lim)
 		eff := withDefaults(lim)
 		if !utf8.ValidString(got) {
 			t.Fatalf("invalid UTF-8: %q", got)
@@ -25,7 +25,7 @@ func FuzzTrimLog(f *testing.F) {
 			t.Fatalf("ESC in output: %q", got)
 		}
 		for _, r := range got {
-			if (unicode.IsControl(r) && r != '\n' && r != '\t') || isBidiControl(r) {
+			if (unicode.IsControl(r) && r != '\n' && r != '\t') || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 				t.Fatalf("forbidden rune %U in %q", r, got)
 			}
 		}
@@ -34,6 +34,20 @@ func FuzzTrimLog(f *testing.F) {
 		}
 		if strings.HasSuffix(got, "\n") {
 			t.Fatalf("trailing newline: %q", got)
+		}
+		// Kept tail: at most MaxBytes, plus the one rune (up to 3 more
+		// bytes) kept when not even a single rune fits.
+		tail := got
+		if strings.HasPrefix(got, "[… ") {
+			_, tail, _ = strings.Cut(got, "\n")
+		}
+		if len(tail) > eff.MaxBytes+3 {
+			t.Fatalf("tail is %d bytes, cap %d: %q", len(tail), eff.MaxBytes, got)
+		}
+		if !truncated {
+			if again, _ := TrimLog(got, lim); again != got {
+				t.Fatalf("untruncated output not idempotent: %q -> %q", got, again)
+			}
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const maxTokenBytes = 4096
@@ -19,10 +20,16 @@ func ExtractFiles(text string, known map[string]struct{}, maxFiles int) []string
 	if maxFiles <= 0 {
 		maxFiles = DefaultLimits().MaxFiles
 	}
+	maxKey := 0
+	for k := range known {
+		maxKey = max(maxKey, len(k))
+	}
 	found := map[string]struct{}{}
-	for _, tok := range strings.FieldsFunc(text, isDelimiter) {
-		if f, ok := lookup(tok, known); ok {
-			found[f] = struct{}{}
+	for _, line := range strings.Split(text, "\n") {
+		for _, tok := range lineTokens(line) {
+			if f, ok := lookup(tok, known, maxKey); ok {
+				found[f] = struct{}{}
+			}
 		}
 	}
 	if len(found) == 0 {
@@ -43,7 +50,21 @@ func isDelimiter(r rune) bool {
 	return unicode.IsSpace(r) || strings.ContainsRune("\"'`()[]{}<>,;=|", r)
 }
 
-func lookup(tok string, known map[string]struct{}) (string, bool) {
+// lineTokens splits one line into tokens. A line cut by TrimLog ends in the
+// line-cut marker, and the token just before it may be a fragment of a longer
+// path (a cut "config.json" reads as the known "config.js"), so it is dropped.
+func lineTokens(line string) []string {
+	content, cut := strings.CutSuffix(line, lineCutMarker)
+	toks := strings.FieldsFunc(content, isDelimiter)
+	if cut && len(toks) > 0 {
+		if r, _ := utf8.DecodeLastRuneInString(content); !isDelimiter(r) {
+			toks = toks[:len(toks)-1]
+		}
+	}
+	return toks
+}
+
+func lookup(tok string, known map[string]struct{}, maxKey int) (string, bool) {
 	if len(tok) > maxTokenBytes {
 		return "", false
 	}
@@ -57,7 +78,8 @@ func lookup(tok string, known map[string]struct{}) (string, bool) {
 	if !isAbsolute(tok) {
 		return "", false
 	}
-	for i := 0; i < len(tok); i++ {
+	// Only suffixes no longer than the longest known path can match.
+	for i := max(0, len(tok)-maxKey-1); i < len(tok); i++ {
 		if tok[i] != '/' {
 			continue
 		}
@@ -99,10 +121,15 @@ func allDigits(s string) bool {
 }
 
 func hasDotDot(tok string) bool {
-	for _, seg := range strings.Split(tok, "/") {
-		if seg == ".." {
+	for start := 0; start <= len(tok); {
+		end := strings.IndexByte(tok[start:], '/')
+		if end < 0 {
+			end = len(tok) - start
+		}
+		if tok[start:start+end] == ".." {
 			return true
 		}
+		start += end + 1
 	}
 	return false
 }
