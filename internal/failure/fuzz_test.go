@@ -63,6 +63,8 @@ func FuzzExtractFiles(f *testing.F) {
 		"src/a.ts:12:5 - error TS2322", "./src/a.ts(12,5): error", "/home/runner/work/app/app/src/b.ts:3",
 		`D:\a\app\app\src\b.ts:3:1`, "main.go:10:2: unused variable\ninternal/x/y.go:1: x",
 		`see "src/a.ts", and (src/b.ts).`, "x/src/a.ts:1", "../src/a.ts", "/etc/../src/a.ts", "docs/my file.md",
+		"/home/runner/work/app/app/pages/[id].tsx:3:5", `"app/(auth)/page.tsx"`, "src/a=b.ts:1", "x/pages/[id].tsx",
+		"pages/[id].tsx" + lineCutMarker, `D:\a\app\app\docs\my file.md(1,1)`,
 	} {
 		f.Add(s, 0)
 		f.Add(s, 1)

@@ -1,6 +1,7 @@
 package failure
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +11,10 @@ import (
 
 func knownSet() map[string]struct{} {
 	m := map[string]struct{}{}
-	for _, f := range []string{"src/a.ts", "src/b.ts", "main.go", "internal/x/y.go", "docs/my file.md"} {
+	for _, f := range []string{
+		"src/a.ts", "src/b.ts", "main.go", "internal/x/y.go",
+		"docs/my file.md", "pages/[id].tsx", "app/(auth)/page.tsx", "src/a=b.ts",
+	} {
 		m[f] = struct{}{}
 	}
 	return m
@@ -33,7 +37,7 @@ func TestExtractFiles(t *testing.T) {
 		{"dotdot relative", "../src/a.ts", 0, nil},
 		{"dotdot absolute", "/etc/../src/a.ts", 0, nil},
 		{"unknown file", "src/c.ts:1", 0, nil},
-		{"whitespace in name", "docs/my file.md", 0, nil},
+		{"whitespace in name", "docs/my file.md", 0, []string{"docs/my file.md"}},
 		{"repeated once", "src/a.ts src/a.ts:1 ./src/a.ts", 0, []string{"src/a.ts"}},
 		{"max one", "src/b.ts src/a.ts", 1, []string{"src/a.ts"}},
 		{"repeated dot slash", "././src/a.ts", 0, []string{"src/a.ts"}},
@@ -51,6 +55,112 @@ func TestExtractFiles(t *testing.T) {
 				t.Fatalf("ExtractFiles(%q) = %v, want %v", tc.text, got, tc.want)
 			}
 		})
+	}
+}
+
+// delimiterNames are known paths whose characters split first-pass tokens.
+var delimiterNames = []string{"pages/[id].tsx", "app/(auth)/page.tsx", "src/a=b.ts", "docs/my file.md"}
+
+func TestExtractFilesDelimiterNames(t *testing.T) {
+	forms := []struct {
+		name  string
+		build func(n string) string
+		found bool
+	}{
+		{"plain", func(n string) string { return n }, true},
+		{"position", func(n string) string { return n + ":12:5 - error" }, true},
+		{"paren position", func(n string) string { return n + "(12,5): error" }, true},
+		{"double quoted", func(n string) string { return `see "` + n + `" here` }, true},
+		{"single quoted", func(n string) string { return "see '" + n + "'" }, true},
+		{"backquoted", func(n string) string { return "see `" + n + "`" }, true},
+		{"after equals", func(n string) string { return "file=" + n + ";" }, true},
+		{"in parens", func(n string) string { return "(" + n + ")" }, true},
+		{"after comma", func(n string) string { return "a.ts, " + n + ", b.ts" }, true},
+		{"absolute runner path", func(n string) string { return "/home/runner/work/app/app/" + n + ":3:1" }, true},
+		{"absolute windows path", func(n string) string {
+			return `D:\a\app\app\` + strings.ReplaceAll(n, "/", `\`) + "(3,1): error"
+		}, true},
+		{"node stack frame", func(n string) string { return "    at f (/home/runner/work/app/app/" + n + ":3:5)" }, true},
+		{"dot slash prefix", func(n string) string { return "./" + n + ":1" }, true},
+		{"second line", func(n string) string { return "first line\n" + n }, true},
+		{"relative prefix", func(n string) string { return "x/" + n + ":1" }, false},
+		{"relative prefix of an absolute-looking token", func(n string) string { return "a/home/" + n }, false},
+		{"dotdot in absolute path", func(n string) string { return "/etc/../" + n }, false},
+		{"dotdot relative", func(n string) string { return "../" + n }, false},
+		{"glued to a word", func(n string) string { return "x" + n }, false},
+		{"followed by a letter", func(n string) string { return n + "x" }, false},
+		{"followed by a dot", func(n string) string { return n + ".bak" }, false},
+		{"before a line cut", func(n string) string { return "see " + n + lineCutMarker }, false},
+		{"split over two lines", func(n string) string { return n[:3] + "\n" + n[3:] }, false},
+	}
+	for _, n := range delimiterNames {
+		for _, form := range forms {
+			t.Run(n+"/"+form.name, func(t *testing.T) {
+				text := form.build(n)
+				got := ExtractFiles(text, knownSet(), 0)
+				var want []string
+				if form.found {
+					want = []string{n}
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("ExtractFiles(%q) = %q, want %q", text, got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestExtractFilesDelimiterNameBoundaries(t *testing.T) {
+	known := map[string]struct{}{"pages/[id].tsx": {}, "pages/[id].tsx.bak": {}, "a b": {}, "a b c": {}}
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"longer name only", "pages/[id].tsx.bak:1", []string{"pages/[id].tsx.bak"}},
+		{"shorter name only", "pages/[id].tsx:1", []string{"pages/[id].tsx"}},
+		{"both", "pages/[id].tsx.bak pages/[id].tsx", []string{"pages/[id].tsx", "pages/[id].tsx.bak"}},
+		// "a b" ends at a space inside "a b c": both are named.
+		{"prefix ending at a space", "a b c", []string{"a b", "a b c"}},
+		{"cut right after a name", "x a b" + lineCutMarker, nil},
+		{"cut after a separator", "x a b " + lineCutMarker, []string{"a b"}},
+		{"cut line, earlier occurrence", "a b, a b" + lineCutMarker, []string{"a b"}},
+		{"overlapping occurrences", "a ba b", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractFiles(tc.text, known, 0); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ExtractFiles(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractFilesDelimiterNameLimit(t *testing.T) {
+	mk := func(n int) map[string]struct{} {
+		m := map[string]struct{}{}
+		for i := range n {
+			m[fmt.Sprintf("dir %04d/file.ts", i)] = struct{}{}
+		}
+		return m
+	}
+	text := strings.Repeat("noise line\n", 1000) + "dir 0007/file.ts:1"
+	if got := ExtractFiles(text, mk(maxSpecialPaths), 0); !reflect.DeepEqual(got, []string{"dir 0007/file.ts"}) {
+		t.Fatalf("at the limit: got %q", got)
+	}
+	if got := ExtractFiles(text, mk(maxSpecialPaths+1), 0); got != nil {
+		t.Fatalf("over the limit the second pass must be skipped: got %q", got)
+	}
+}
+
+// TestExtractFilesDelimiterNamesAreLinear would take minutes with a naive
+// search: the name is long and periodic, and the text repeats its prefix.
+func TestExtractFilesDelimiterNamesAreLinear(t *testing.T) {
+	name := strings.Repeat("a ", 2000) + "b"
+	known := map[string]struct{}{name: {}}
+	text := strings.Repeat("a ", 1<<20) + "b"
+	if got := ExtractFiles(text, known, 0); !reflect.DeepEqual(got, []string{name}) {
+		t.Fatalf("got %d files", len(got))
 	}
 }
 
