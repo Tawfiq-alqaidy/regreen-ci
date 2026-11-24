@@ -1,6 +1,7 @@
 package failure
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -35,19 +36,24 @@ func FuzzTrimLog(f *testing.F) {
 		if strings.HasSuffix(got, "\n") {
 			t.Fatalf("trailing newline: %q", got)
 		}
-		// Kept tail: at most MaxBytes, plus the one rune (up to 3 more
-		// bytes) kept when not even a single rune fits.
+		// The kept tail (output minus the optional header line) fits MaxBytes.
 		tail := got
-		if strings.HasPrefix(got, "[… ") {
+		if hasHeader(got) {
 			_, tail, _ = strings.Cut(got, "\n")
 		}
-		if len(tail) > eff.MaxBytes+3 {
+		if len(tail) > eff.MaxBytes {
 			t.Fatalf("tail is %d bytes, cap %d: %q", len(tail), eff.MaxBytes, got)
 		}
-		if !truncated {
-			if again, _ := TrimLog(got, lim); again != got {
-				t.Fatalf("untruncated output not idempotent: %q -> %q", got, again)
-			}
+		// Re-trimming is stable. A truncated output may start with blank
+		// lines (kept after earlier lines were dropped) that a second pass
+		// drops, and its header line is not part of the log, so compare the
+		// tail with leading newlines removed.
+		want := tail
+		if truncated {
+			want = strings.TrimLeft(tail, "\n")
+		}
+		if again, _ := TrimLog(tail, lim); again != want {
+			t.Fatalf("not idempotent: %q -> %q", tail, again)
 		}
 	})
 }
@@ -79,4 +85,12 @@ func FuzzExtractFiles(f *testing.F) {
 			t.Fatalf("duplicates in %v", got)
 		}
 	})
+}
+
+// hasHeader reports whether s starts with the "earlier lines trimmed" line.
+func hasHeader(s string) bool {
+	line, _, _ := strings.Cut(s, "\n")
+	var n int
+	_, err := fmt.Sscanf(line, "[… %d earlier lines trimmed …]", &n)
+	return err == nil && strings.HasSuffix(line, "trimmed …]")
 }

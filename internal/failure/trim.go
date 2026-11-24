@@ -13,7 +13,10 @@ const lineCutMarker = " …[line cut]"
 // TrimLog sanitizes and caps untrusted text, keeping the tail. It replaces
 // invalid UTF-8, normalizes line endings, removes terminal escape sequences,
 // control characters and bidirectional overrides, then enforces the limits.
-// Non-positive limit fields take their DefaultLimits value. The returned
+// Non-positive limit fields take their DefaultLimits value, and MaxBytes is
+// raised to the smallest useful cap (the cut marker plus one rune). A line is
+// cut to MaxLineBytes (or less, so that it plus the marker fits MaxBytes) and
+// always carries the marker; nothing is ever cut inside a line without it. The returned
 // text never ends with a newline; truncated reports that anything was cut.
 func TrimLog(raw string, lim Limits) (text string, truncated bool) {
 	lim = withDefaults(lim)
@@ -22,21 +25,27 @@ func TrimLog(raw string, lim Limits) (text string, truncated bool) {
 	if len(lines) == 0 {
 		return "", false
 	}
+	// A cut line (content plus marker) must fit in MaxBytes, so that every
+	// cut inside a line is a marked one and the last line is always kept
+	// whole. withDefaults guarantees MaxBytes leaves room for the marker.
+	maxLine := min(lim.MaxLineBytes, lim.MaxBytes-len(lineCutMarker))
 	for i, l := range lines {
-		if len(l) > lim.MaxLineBytes {
-			lines[i] = cutRunes(l, lim.MaxLineBytes) + lineCutMarker
-			truncated = true
+		if len(l) <= maxLine {
+			continue
 		}
+		truncated = true
+		// A line cut by an earlier pass keeps its marker as it is, so the
+		// marker never turns into plain content.
+		if content, ok := strings.CutSuffix(l, lineCutMarker); ok && len(content) <= maxLine {
+			continue
+		}
+		lines[i] = cutRunes(l, maxLine) + lineCutMarker
 	}
 	keep := tailThatFits(lines, lim)
 	if keep < len(lines) {
 		truncated = true
 	}
 	tail := lines[len(lines)-keep:]
-	if len(tail) == 1 && len(tail[0]) > lim.MaxBytes {
-		tail[0] = cutLastLine(tail[0], lim.MaxBytes)
-		truncated = true
-	}
 	out := strings.Join(tail, "\n")
 	if dropped := len(lines) - keep; dropped > 0 {
 		out = fmt.Sprintf("[… %d earlier lines trimmed …]\n%s", dropped, out)
@@ -52,6 +61,8 @@ func withDefaults(lim Limits) Limits {
 	if lim.MaxBytes <= 0 {
 		lim.MaxBytes = d.MaxBytes
 	}
+	// The smallest useful cap holds a cut line: the marker plus one rune.
+	lim.MaxBytes = max(lim.MaxBytes, len(lineCutMarker)+utf8.UTFMax)
 	if lim.MaxLineBytes <= 0 {
 		lim.MaxLineBytes = d.MaxLineBytes
 	}
@@ -166,7 +177,7 @@ func cutRunes(s string, n int) string {
 }
 
 // tailThatFits returns how many trailing lines fit both caps. It is at least
-// one: the last line is always kept.
+// one, and every line fits MaxBytes on its own after the line cut.
 func tailThatFits(lines []string, lim Limits) int {
 	keep, size := 0, 0
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -181,23 +192,4 @@ func tailThatFits(lines []string, lim Limits) int {
 		size += add
 	}
 	return keep
-}
-
-// cutLastLine cuts the one kept line to at most n bytes at a rune boundary
-// (the line-cut marker is dropped whole rather than left partial) and trims
-// trailing blanks. When nothing but blanks would remain it keeps the line's
-// first non-blank rune, so the output of non-empty input is never empty; that
-// one rune may exceed n.
-func cutLastLine(line string, n int) string {
-	cut := cutRunes(line, n)
-	if content, ok := strings.CutSuffix(line, lineCutMarker); ok && len(cut) > len(content) {
-		cut = content
-	}
-	cut = strings.TrimRight(cut, " \t")
-	if cut != "" {
-		return cut
-	}
-	rest := strings.TrimLeft(line, " \t")
-	_, size := utf8.DecodeRuneInString(rest)
-	return rest[:size]
 }

@@ -70,25 +70,26 @@ func trimCases() []trimCase {
 			want: "[… 490 earlier lines trimmed …]\n" + tail, truncated: true,
 		},
 		{
-			name: "byte cap smaller than line cap", in: "aaaa\nbbbb\ncccc\ndddd", lim: Limits{MaxBytes: 10},
-			want: "[… 2 earlier lines trimmed …]\ncccc\ndddd", truncated: true,
+			name: "byte cap smaller than line cap", in: "aaaa\nbbbb\ncccc\ndddd", lim: Limits{MaxBytes: 18},
+			want: "[… 1 earlier lines trimmed …]\nbbbb\ncccc\ndddd", truncated: true,
 		},
-		{name: "byte cap exact fit", in: "aaaa\nbbbb", lim: Limits{MaxBytes: 9}, want: "aaaa\nbbbb"},
+		{name: "byte cap exact fit", in: "aaaa\nbbbb\ncccc\ndddd", lim: Limits{MaxBytes: 19}, want: "aaaa\nbbbb\ncccc\ndddd"},
 		{
-			name: "single last line over byte cap", in: "x\nabcdéfgh", lim: Limits{MaxBytes: 5, MaxLineBytes: 100},
-			want: "[… 1 earlier lines trimmed …]\nabcd", truncated: true,
-		},
-		{
-			name: "byte cap smaller than one rune", in: "0\n\xff", lim: Limits{MaxBytes: 1},
-			want: "[… 1 earlier lines trimmed …]\n\uFFFD", truncated: true,
-		},
-		{
-			name: "cut inside the marker drops the marker", in: "x\n" + strings.Repeat("y", 20),
+			name: "cut line plus marker fits MaxBytes", in: "x\n" + strings.Repeat("y", 20),
 			lim:  Limits{MaxBytes: 25, MaxLineBytes: 15},
-			want: "[… 1 earlier lines trimmed …]\n" + strings.Repeat("y", 15), truncated: true,
+			want: "[… 1 earlier lines trimmed …]\n" + strings.Repeat("y", 11) + lineCutMarker, truncated: true,
 		},
-		{name: "byte cut trims trailing blanks", in: "ab  cd", lim: Limits{MaxBytes: 4}, want: "ab", truncated: true},
-		{name: "byte cut leaving blanks keeps first rune", in: " a", lim: Limits{MaxBytes: 1}, want: "a", truncated: true},
+		{name: "tiny MaxBytes is raised, line cut is marked", in: "ab  cd", lim: Limits{MaxBytes: 4}, want: "ab  " + lineCutMarker, truncated: true},
+		{name: "tiny MaxBytes still fits a short line", in: " a", lim: Limits{MaxBytes: 1}, want: " a"},
+		{
+			name: "tiny MaxBytes, earlier lines dropped", in: "x\nabcdéfgh", lim: Limits{MaxBytes: 5, MaxLineBytes: 100},
+			want: "[… 1 earlier lines trimmed …]\nabcd" + lineCutMarker, truncated: true,
+		},
+		{name: "tiny MaxBytes, short lines kept", in: "0\n\xff", lim: Limits{MaxBytes: 1}, want: "0\n\uFFFD"},
+		{
+			name: "already cut line stays as it is", in: strings.Repeat("x", 1998) + lineCutMarker,
+			want: strings.Repeat("x", 1998) + lineCutMarker, truncated: true,
+		},
 		{name: "zero limits behave like defaults", in: "a\nb", lim: Limits{}, want: "a\nb"},
 		{name: "marker not counted", in: "a\nb\nc", lim: Limits{MaxLines: 2}, want: "[… 1 earlier lines trimmed …]\nb\nc", truncated: true},
 	}
@@ -139,7 +140,19 @@ func TestTrimLogDefaultsApplyPerField(t *testing.T) {
 
 func TestTrimLogLineLimitLargerThanByteLimit(t *testing.T) {
 	got, trunc := TrimLog("héllo wörld", Limits{MaxBytes: 4, MaxLineBytes: 100})
-	if got != "hél" || !trunc {
-		t.Fatalf("got (%q, %v)", got, trunc)
+	if want := "hél" + lineCutMarker; got != want || !trunc {
+		t.Fatalf("got (%q, %v), want %q", got, trunc, want)
+	}
+}
+
+func TestTrimLogTwiceKeepsCutMarker(t *testing.T) {
+	in := strings.Repeat("x", 1998) + "€"
+	once, trunc := TrimLog(in, Limits{})
+	twice, trunc2 := TrimLog(once, Limits{})
+	if once != strings.Repeat("x", 1998)+lineCutMarker || !trunc {
+		t.Fatalf("first pass: %d bytes, truncated %v", len(once), trunc)
+	}
+	if twice != once || !trunc2 {
+		t.Fatalf("second pass changed the text or lost truncated: %d bytes, truncated %v", len(twice), trunc2)
 	}
 }

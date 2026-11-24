@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Tawfiq-alqaidy/regreen-ci/internal/ci"
 )
 
 func knownSet() map[string]struct{} {
@@ -92,9 +94,12 @@ func TestExtractFilesIgnoresFragmentBeforeLineCut(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{"a.go", "config.js"}) {
 		t.Fatalf("got %v", got)
 	}
-	// A cut that ends after a delimiter leaves the last token complete.
-	if got := ExtractFiles("config.js"+" "+lineCutMarker[1:], known, 0); got != nil {
-		t.Fatalf("marker without leading space is plain text: %v", got)
+	// Without the marker's leading space it is plain text, not a cut.
+	if got := ExtractFiles("config.js"+lineCutMarker[1:], known, 0); got != nil {
+		t.Fatalf("token glued to marker text is not a known file: %v", got)
+	}
+	if got := ExtractFiles("config.js\t"+lineCutMarker[1:], known, 0); !reflect.DeepEqual(got, []string{"config.js"}) {
+		t.Fatalf("marker text without its leading space is plain content: %v", got)
 	}
 	if got := ExtractFiles("config.js "+lineCutMarker, known, 0); !reflect.DeepEqual(got, []string{"config.js"}) {
 		t.Fatalf("complete token before a cut: %v", got)
@@ -113,5 +118,26 @@ func TestExtractFilesSuffixLimitedByLongestKnown(t *testing.T) {
 	known := map[string]struct{}{"a/b.go": {}}
 	if got := ExtractFiles("/r/w/a/b.go", known, 0); !reflect.DeepEqual(got, []string{"a/b.go"}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestNoMidLineCutWithoutMarker(t *testing.T) {
+	known := map[string]struct{}{"config.js": {}, "config.json": {}}
+	tests := []struct {
+		name string
+		log  string
+		lim  Limits
+	}{
+		{"small byte cap", "foo config.json", Limits{MaxBytes: 13}},
+		{"long line, byte cap", strings.Repeat("x", 1990) + " config.json", Limits{MaxBytes: 2000}},
+		{"long line, default", strings.Repeat("x", 1990) + " config.json", Limits{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Build(ci.FailedStep{}, "c", tc.log, nil, known, tc.lim)
+			if len(got.Files) != 0 {
+				t.Fatalf("Files = %v from %q", got.Files, got.Errors)
+			}
+		})
 	}
 }
