@@ -11,7 +11,7 @@ Early development. Milestones M0 to M2 are done. M0 is the scaffold: the binary 
 | Milestone | Delivers | State |
 |---|---|---|
 | M0 | Scaffold: module, CLI skeleton, lint, CI, docs | done |
-| M1 | Config loading and the policy engine | done, pending review |
+| M1 | Config loading and the policy engine | done |
 | M2 | GitHub Actions adapter and the failure model | done, pending review |
 | M3 | MCP server (`regreen mcp`) | planned |
 | M4 | Enforcement: `regreen verify`, `regreen init`, pre-push hook | planned |

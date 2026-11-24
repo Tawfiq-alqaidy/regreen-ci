@@ -83,41 +83,43 @@ Nothing calls these three packages from the command line yet either. They are te
 
 ```
 internal/ci/            provider-neutral CI types; no I/O
-  ci.go         Status, Repo, FailedStep, CommitStatus, the Provider interface, ValidCommit
+  ci.go         Status, Repo, FailedStep, CommitStatus, StepLog, the Provider interface, ValidCommit
   remote.go     ParseRemote: a git remote URL -> Repo
 
 internal/ci/github/     the GitHub Actions implementation of ci.Provider
   auth.go       Token: GH_TOKEN, GITHUB_TOKEN, then `gh auth token`
   provider.go   New, Provider, CommitStatus (runs, jobs, steps)
   id.go         encodeID, parseID: "gha-<run>-<job>-<step>"
-  logs.go       FailureLog: log location, download, step cut, framing removed
+  logs.go       FailureLog: ID checks, log location, download, step cut, framing removed
   live_test.go  TestLive: runs against the real API only when asked
 
 internal/failure/       the normalized failure; no I/O
   failure.go    Failure, Limits, DefaultLimits, Build
   trim.go       TrimLog: sanitize and cap untrusted text
-  files.go      ExtractFiles: tokens in the text that are known files
+  files.go      ExtractFiles: known files the text names (tokens, then names with delimiters)
   match.go      MatchCheck: a failed step -> a configured check
 ```
 
-`internal/ci` and `internal/failure` may not import `os`, `os/exec`, `net` or `net/http`; `TestCIPackageIsPure` and `TestFailurePackageIsPure` read the import lists and fail otherwise. Nothing GitHub-specific is in either package. `internal/ci/github` is the only package that imports go-github (decision D31) or runs another program (`gh`). `internal/failure` imports `internal/ci` and `internal/config` (for `config.Check`); neither of those imports it back.
+`internal/ci` and `internal/failure` may not import `os`, `os/exec`, `net` or `net/http`; `TestCIPackageIsPure` and `TestFailurePackageIsPure` read the import lists and fail otherwise. The tests check direct imports only: `internal/failure` imports `internal/config`, whose `LoadRepo` reads a file, so the rule is that these packages do no I/O themselves, not that nothing they link to can. Nothing GitHub-specific is in either package. `internal/ci/github` is the only package that imports go-github (decision D31) or runs another program (`gh`). `internal/failure` imports `internal/ci` and `internal/config` (for `config.Check`); neither of those imports it back.
 
 Data flow, as a caller such as M3 would use it:
 
 ```
 git remote URL --ci.ParseRemote--> ci.Repo
-Repo + commit  --Provider.CommitStatus--> ci.CommitStatus{Status, Failed []ci.FailedStep}
-Repo + step ID --Provider.FailureLog--> raw step log (untrusted text)
-step + commit + log + checks + known files --failure.Build--> failure.Failure
+Repo + commit  --Provider.CommitStatus--> ci.CommitStatus{Status, Commit, Failed []ci.FailedStep}
+Repo + step ID --Provider.FailureLog--> ci.StepLog{Step, Commit, Log (untrusted text), Partial}
+StepLog + checks + known files --failure.Build--> failure.Failure
 ```
+
+The caller checks `StepLog.Commit` against the commit it is fixing before it calls `Build` (D33, D42).
 
 `CommitStatus` lists the workflow runs for the commit (decision D34). If any run is not completed the status is `pending`. If none exist it is `no_runs`. Otherwise the newest run of each (workflow, event, branch) group is judged; a conclusion other than `success`, `skipped` or `neutral` fails (D35), and each failing job yields its failed steps, each with an ID (D33). A listing that is incomplete, or too long to read, is an error.
 
-`FailureLog` checks the host and the ID, reads the job, and checks that the job belongs to the run in the ID. It then fetches the log through a signed URL with a client that has no token (D37), cuts out the step's lines by timestamp (D36), and strips GitHub's per-line timestamps and markers. It does not sanitize; that is `failure.Build`'s job.
+`FailureLog` checks the host and the ID, reads the job, and checks that the job belongs to the run in the ID, is completed and failed, and that the ID's step number names one of its failed steps (or is 0 for a failed job without a failed step). It rebuilds the step and the commit from that job (D33, D42). Only then does it fetch the log through a signed URL with a client that has no token (D37), cut out the step's lines by timestamp (D36), and strip GitHub's per-line timestamps and markers. A numbered step whose lines cannot be isolated gets an empty log marked `Partial`, never the whole job log. It does not sanitize; that is `failure.Build`'s job. A run-level ID returns at once, with no log and no commit.
 
-`failure.Build` calls `TrimLog` (D41), then `ExtractFiles` on the trimmed text (D40), then `MatchCheck` (D39). `Fixable` is true exactly when a check matched; `Check` and `Command` are empty otherwise. `Files` is only as good as the `known` set the caller passes.
+`failure.Build` copies the step and the commit from the `StepLog`, calls `TrimLog` (D41), then `ExtractFiles` on the trimmed text (D40), then `MatchCheck` (D39). `Truncated` is set when `TrimLog` cut anything or the `StepLog` was `Partial`. `Fixable` is true exactly when a check matched; `Check` and `Command` are empty otherwise. `Files` is only as good as the `known` set the caller passes.
 
-Error handling: errors are wrapped with `%w` and say which job, run or repository failed. The token and the signed log URL never appear in an error; where an underlying error could contain the URL, it is not wrapped. Library code writes nothing to stdout and does not log.
+Error handling: errors are wrapped with `%w` and say which job, run or repository failed. The token and the signed log URL never appear in an error; where an underlying error could contain the URL, it is replaced by a fixed text (D37). Library code writes nothing to stdout and does not log. Every HTTP request, to the API or to the log host, has its own 30-second timeout.
 
 ## Layout
 
@@ -181,9 +183,14 @@ These controls guarantee that a fix follows the rules, not that it is logically 
 
 M2 stops at the library boundary. These are the things M3 must do when it calls the M2 packages.
 
-1. **The 45-second wait loop calls `CommitStatus`.** `Provider.CommitStatus` makes several API calls (runs, then jobs for failing runs) and does not retry or back off on a rate limit. The loop decides how often to call it and what to do with `pending`. Treat an error as "unknown", never as "green".
-2. **Known files come from git.** `failure.Build` takes the set of tracked files as an argument. M3 must build it from the original failing commit (or the base), not from the agent's later push, and must build `Failure` for the files from the original failure's log (decision D30 and D40). Using the working tree after the agent has edited it would let the agent add a file and have a log name it.
-3. **`Failure.Fixable == false` must be reported, not fixed.** The tool output must say that no configured check matched (or that the match was ambiguous) and must not guess a command.
-4. **Printers must quote log-derived strings.** `Errors` is multi-line and untrusted; `Workflow`, `Job`, `Step` and `URL` are attacker-influenced too. Quote them (`%q`) in any log line, and delimit `Errors` as data in the tool output.
-5. **Run-level failures have no log.** A failed step with an empty `Job` (a run that failed with no failing job) has an ID that `FailureLog` answers with an empty string. `Build` handles that: empty log, empty excerpt, no files.
-6. **The ID is a lookup key, not a capability.** `FailureLog` re-checks that the job belongs to the run in the ID and uses the caller's token; M3 should still pass only IDs it got from `CommitStatus` for the same repository.
+1. **Bind every failure to the commit being fixed.** A failure ID reaches `get_failure` and `submit_fix` from the agent, so it is untrusted. `FailureLog` rebuilds the step and the commit from GitHub's records and refuses an ID that does not name a failed step, but it cannot know which commit M3 is fixing: `get_failure` and `submit_fix` MUST reject a `StepLog` whose `Commit` differs from that commit (decisions D33 and D42). Pass only IDs from `CommitStatus` for the same repository.
+2. **Run-level failures have no log.** A failed step with an empty `Job` (a run that failed with no failing job) has an ID for which `FailureLog` returns a `StepLog` with only `Step.ID` set: no log and no commit. Its commit comes from `CommitStatus`. `Build` handles the empty log: empty excerpt, no files.
+3. **The 45-second wait loop calls `CommitStatus`.** `Provider.CommitStatus` makes several API calls (runs, then jobs for failing runs) and does not retry or back off on a rate limit. `no_runs` right after a push is normal: GitHub creates the runs for a push with a delay, so the loop keeps polling within its window instead of reporting `no_runs` as final. Treat an error as "unknown", never as "green".
+4. **Timeouts and budgets.** Every HTTP request has its own 30-second timeout, so one `CommitStatus` or `FailureLog` call can take longer than 30 seconds in total. M3 passes a context with a deadline inside its own budget of about 45 seconds; the calls return the context's error when it expires.
+5. **Resolve the token once per process.** `Token` may run `gh auth token`, which can take up to 10 seconds. Call it once, build one `Provider`, and reuse it for every call.
+6. **Known files come from git.** `failure.Build` takes the set of tracked files as an argument. M3 must build it from the original failing commit (or the base), not from the agent's later push, and must build `Failure` for the files from the original failure's log (decisions D30 and D40). Using the working tree after the agent has edited it would let the agent add a file and have a log name it.
+7. **`Failure.Fixable == false` must be reported, not fixed.** The tool output must say that no configured check matched (or that the match was ambiguous) and must not guess a command.
+8. **Printers must quote log-derived strings.** `Errors` is multi-line and untrusted; `Workflow`, `Job`, `Step` and `URL` are attacker-influenced too. Quote them (`%q`) in any log line, and delimit `Errors` as data in the tool output.
+9. **What `Failure.Errors` can look like.** It can be empty (a run-level failure, or a `Partial` step log with no lines). It can exceed `MaxBytes` by the header line (`[… N earlier lines trimmed …]`) and hold `MaxLines + 1` lines. `Truncated` says that something was cut or that the provider's log was `Partial`.
+10. **Status strings.** The values of `ci.Status` (`success`, `failure`, `pending`, `no_runs`) are the output strings the brief specifies for `wait_for_ci`; M3 can print them as they are.
+11. **Purity is checked on direct imports only.** `TestFailurePackageIsPure` allows `internal/config`, which does I/O in `LoadRepo`. M3 should not read that as a guarantee that everything reachable from `internal/failure` is pure.
