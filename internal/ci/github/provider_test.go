@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Tawfiq-alqaidy/regreen-ci/internal/ci"
 	gogithub "github.com/google/go-github/v93/github"
@@ -43,6 +46,8 @@ func run(id, workflow int64, event, status, conclusion string, number int) fakeR
 		HTMLURL: fmt.Sprintf("https://example.test/run/%d", id),
 	}
 }
+
+func withBranch(r fakeRun, branch string) fakeRun { r.HeadBranch = branch; return r }
 
 func okRun(id int64) fakeRun { return run(id, id, "push", "completed", "success", 1) }
 
@@ -109,33 +114,48 @@ func TestRequestsCarryAuthAndQuery(t *testing.T) {
 
 func TestCommitStatusAggregation(t *testing.T) {
 	tests := []struct {
-		name     string
-		runs     []fakeRun
-		want     ci.Status
-		wantJobs int
+		name string
+		runs []fakeRun
+		want ci.Status
 	}{
-		{"no runs", nil, ci.StatusNoRuns, 0},
-		{"in progress", []fakeRun{run(1, 1, "push", "in_progress", "", 1)}, ci.StatusPending, 0},
-		{"all success", []fakeRun{okRun(1), okRun(2)}, ci.StatusSuccess, 0},
+		{"no runs", nil, ci.StatusNoRuns},
+		{"in progress", []fakeRun{run(1, 1, "push", "in_progress", "", 1)}, ci.StatusPending},
+		{"all success", []fakeRun{okRun(1), okRun(2)}, ci.StatusSuccess},
 		{"skipped and neutral pass", []fakeRun{
 			run(1, 1, "push", "completed", "skipped", 1),
 			run(2, 2, "push", "completed", "neutral", 1),
-		}, ci.StatusSuccess, 0},
+		}, ci.StatusSuccess},
 		{"rerun succeeded supersedes failure", []fakeRun{
 			run(1, 1, "push", "completed", "failure", 7),
 			run(2, 1, "push", "completed", "success", 8),
-		}, ci.StatusSuccess, 0},
+		}, ci.StatusSuccess},
 		{"higher attempt wins on equal number", []fakeRun{
 			func() fakeRun { r := run(1, 1, "push", "completed", "failure", 7); r.RunAttempt = 1; return r }(),
 			func() fakeRun { r := run(1, 1, "push", "completed", "success", 7); r.RunAttempt = 2; return r }(),
-		}, ci.StatusSuccess, 0},
+		}, ci.StatusSuccess},
 		{"different events are separate groups", []fakeRun{
 			run(1, 1, "push", "completed", "success", 8),
 			run(2, 1, "pull_request", "completed", "failure", 7),
-		}, ci.StatusFailure, 1},
+		}, ci.StatusFailure},
+		{"superseded in-progress run still counts as pending", []fakeRun{
+			run(1, 1, "push", "in_progress", "", 7),
+			run(2, 1, "push", "completed", "success", 8),
+		}, ci.StatusPending},
+		{"newer run listed first gives the same result", []fakeRun{
+			run(2, 1, "push", "completed", "success", 8),
+			run(1, 1, "push", "completed", "failure", 7),
+		}, ci.StatusSuccess},
+		{"same branch, 7 failed and 8 success", []fakeRun{
+			withBranch(run(1, 1, "push", "completed", "failure", 7), "main"),
+			withBranch(run(2, 1, "push", "completed", "success", 8), "main"),
+		}, ci.StatusSuccess},
+		{"failure on either branch counts", []fakeRun{
+			withBranch(run(1, 1, "push", "completed", "failure", 7), "main"),
+			withBranch(run(2, 1, "push", "completed", "success", 8), "release"),
+		}, ci.StatusFailure},
 		{"failure plus queued is pending", []fakeRun{
 			failedRun(1), run(2, 2, "push", "queued", "", 1),
-		}, ci.StatusPending, 0},
+		}, ci.StatusPending},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +169,7 @@ func TestCommitStatusAggregation(t *testing.T) {
 			if got.Status != ci.StatusFailure && len(got.Failed) != 0 {
 				t.Fatalf("non-failure with Failed: %+v", got.Failed)
 			}
-			if n := f.requestCount("/jobs"); tc.want != ci.StatusFailure && n != 0 {
+			if n := f.requestCount("/jobs"); tc.want == ci.StatusPending && n != 0 {
 				t.Fatalf("jobs endpoint called %d times", n)
 			}
 		})
@@ -171,7 +191,7 @@ func TestFailedStepEntry(t *testing.T) {
 		ID: "gha-100-200-2", Workflow: "wf-100", Job: "build", Step: "go test", StepNumber: 2,
 		URL: "https://example.test/job/200",
 	}
-	if got.Status != ci.StatusFailure || len(got.Failed) != 1 || got.Failed[0] != want {
+	if got.Status != ci.StatusFailure || len(got.Failed) != 1 || !reflect.DeepEqual(got.Failed[0], want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	reqs := f.allRequests()
@@ -228,7 +248,7 @@ func TestFailedShapes(t *testing.T) {
 			f.runs = []fakeRun{r}
 			f.jobs[5] = tc.jobs
 			got := status(t, newTestProvider(t, f))
-			if got.Status != ci.StatusFailure || fmt.Sprint(got.Failed) != fmt.Sprint(tc.want) {
+			if got.Status != ci.StatusFailure || !reflect.DeepEqual(got.Failed, tc.want) {
 				t.Fatalf("got %+v\nwant %+v", got.Failed, tc.want)
 			}
 		})
@@ -400,5 +420,88 @@ func TestCommitStatusValidation(t *testing.T) {
 				t.Fatal("validation failure still hit the API")
 			}
 		})
+	}
+}
+
+func TestRunPageBoundary(t *testing.T) {
+	f := newFakeGitHub(t)
+	for i := int64(1); i <= 1000; i++ {
+		f.runs = append(f.runs, okRun(i))
+	}
+	if got := status(t, newTestProvider(t, f)); got.Status != ci.StatusSuccess {
+		t.Fatalf("got %+v", got)
+	}
+	if n := f.requestCount("/actions/runs"); n != 10 {
+		t.Fatalf("runs requests = %d, want exactly 10", n)
+	}
+}
+
+func TestTooManyJobPages(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.runs = []fakeRun{failedRun(5)}
+	for i := int64(1); i <= 1001; i++ {
+		f.jobs[5] = append(f.jobs[5], fakeJob{ID: i, Name: "j", Status: "completed", Conclusion: "success"})
+	}
+	_, err := newTestProvider(t, f).CommitStatus(context.Background(), testRepo, testSHA)
+	if err == nil || !strings.Contains(err.Error(), "too many jobs") {
+		t.Fatalf("err = %v", err)
+	}
+	noLeak(t, err)
+}
+
+func TestIncompleteListsAreErrors(t *testing.T) {
+	t.Run("runs", func(t *testing.T) {
+		f := newFakeGitHub(t)
+		f.runs = []fakeRun{okRun(1)}
+		f.runsTotal = 1200
+		_, err := newTestProvider(t, f).CommitStatus(context.Background(), testRepo, testSHA)
+		if err == nil || !strings.Contains(err.Error(), "workflow runs list is incomplete") {
+			t.Fatalf("err = %v", err)
+		}
+		noLeak(t, err)
+	})
+	t.Run("jobs", func(t *testing.T) {
+		f := newFakeGitHub(t)
+		f.runs = []fakeRun{failedRun(5)}
+		f.jobs[5] = []fakeJob{{ID: 1, Name: "j", Status: "completed", Conclusion: "success"}}
+		f.jobsTotal = 500
+		_, err := newTestProvider(t, f).CommitStatus(context.Background(), testRepo, testSHA)
+		if err == nil || !strings.Contains(err.Error(), "jobs list is incomplete") {
+			t.Fatalf("err = %v", err)
+		}
+		noLeak(t, err)
+	})
+}
+
+type countingTransport struct {
+	n    atomic.Int64
+	next http.RoundTripper
+}
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return c.next.RoundTrip(r)
+}
+
+func TestWithHTTPClientIsUsedAndNotModified(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.runs = []fakeRun{okRun(1)}
+	ct := &countingTransport{next: http.DefaultTransport}
+	hc := &http.Client{Transport: ct, Timeout: 7 * time.Second}
+	p, err := New(testToken, WithBaseURL(f.baseURL()), WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status(t, p); got.Status != ci.StatusSuccess {
+		t.Fatalf("got %+v", got)
+	}
+	if ct.n.Load() == 0 {
+		t.Fatal("supplied transport was not used")
+	}
+	if hc.Timeout != 7*time.Second || hc.Transport != http.RoundTripper(ct) {
+		t.Fatalf("caller's client was modified: timeout %v", hc.Timeout)
+	}
+	if reqs := f.allRequests(); reqs[0].Auth != "Bearer "+testToken {
+		t.Fatalf("Authorization = %q", reqs[0].Auth)
 	}
 }

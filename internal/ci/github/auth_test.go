@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func envOf(m map[string]string) func(string) string {
@@ -103,7 +104,7 @@ func writeFakeGh(t *testing.T, script string) {
 	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o700); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+"/bin"+string(os.PathListSeparator)+"/usr/bin")
 }
 
 func TestTokenRealGhRunner(t *testing.T) {
@@ -140,4 +141,30 @@ func TestTokenNoGhOnPath(t *testing.T) {
 	if !errors.Is(err, ErrNoToken) {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func TestTokenGhCancellation(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	writeFakeGh(t, "#!/bin/sh\nsleep 30\n")
+	t.Run("cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(100*time.Millisecond, cancel)
+		start := time.Now()
+		_, err := Token(ctx)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrNoToken) {
+			t.Fatalf("err = %v", err)
+		}
+		if d := time.Since(start); d > 10*time.Second {
+			t.Fatalf("took %v", d)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, err := Token(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v", err)
+		}
+	})
 }

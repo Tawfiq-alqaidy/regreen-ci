@@ -34,9 +34,9 @@ type Option func(*options)
 // WithBaseURL overrides the API base URL, for tests. It must end with "/".
 func WithBaseURL(u string) Option { return func(o *options) { o.baseURL = u } }
 
-// WithHTTPClient sets the HTTP client used for API calls, for tests. The
-// client is adopted, not copied: go-github installs the credential
-// transport on it and sets its timeout.
+// WithHTTPClient sets the transport for API calls, for tests. go-github
+// makes a shallow copy of c and applies the timeout and credential
+// transport to the copy; the caller's client is not modified.
 func WithHTTPClient(c *http.Client) Option { return func(o *options) { o.httpClient = c } }
 
 // Provider is the GitHub Actions implementation of ci.Provider. The token
@@ -79,9 +79,12 @@ func (p *Provider) String() string { return "github-actions provider" }
 // Name returns ProviderName.
 func (p *Provider) Name() string { return ProviderName }
 
+// runGroup identifies one line of runs: reruns and newer pushes replace
+// older runs only within the same workflow, event and branch.
 type runGroup struct {
 	workflowID int64
 	event      string
+	branch     string
 }
 
 // CommitStatus reports the aggregate GitHub Actions state of commit.
@@ -104,12 +107,14 @@ func (p *Provider) CommitStatus(ctx context.Context, repo ci.Repo, commit string
 		return ci.CommitStatus{Status: ci.StatusNoRuns, Commit: commit}, nil
 	}
 
-	latest := latestPerGroup(runs)
-	for _, r := range latest {
+	// Pending until every run for the commit has completed, including runs
+	// a newer run of the same group has superseded.
+	for _, r := range runs {
 		if r.GetStatus() != "completed" {
 			return ci.CommitStatus{Status: ci.StatusPending, Commit: commit}, nil
 		}
 	}
+	latest := latestPerGroup(runs)
 
 	var failing []*gogithub.WorkflowRun
 	for _, r := range latest {
@@ -141,6 +146,7 @@ func (p *Provider) listRuns(ctx context.Context, repo ci.Repo, commit string) ([
 		ListOptions: gogithub.ListOptions{PerPage: perPage},
 	}
 	var runs []*gogithub.WorkflowRun
+	received := 0
 	for pages := 0; ; pages++ {
 		if pages == maxPages {
 			return nil, fmt.Errorf("too many workflow runs for %s: more than %d pages", repo, maxPages)
@@ -149,25 +155,31 @@ func (p *Provider) listRuns(ctx context.Context, repo ci.Repo, commit string) ([
 		if err != nil {
 			return nil, fmt.Errorf("list workflow runs for %s: %w", repo, err)
 		}
+		received += len(res.WorkflowRuns)
 		for _, r := range res.WorkflowRuns {
 			if r.GetHeadSHA() == commit {
 				runs = append(runs, r)
 			}
 		}
 		if resp.NextPage == 0 {
+			// GitHub caps how many results a listing can return; refuse
+			// to decide on partial data.
+			if res.GetTotalCount() > received {
+				return nil, fmt.Errorf("workflow runs list is incomplete for %s: received %d of %d", repo, received, res.GetTotalCount())
+			}
 			return runs, nil
 		}
 		opts.Page = resp.NextPage
 	}
 }
 
-// latestPerGroup keeps, for each (workflow, event), the run with the highest
+// latestPerGroup keeps, for each (workflow, event, branch), the run with the highest
 // run number, then the highest attempt.
 func latestPerGroup(runs []*gogithub.WorkflowRun) []*gogithub.WorkflowRun {
 	best := map[runGroup]*gogithub.WorkflowRun{}
 	var order []runGroup
 	for _, r := range runs {
-		k := runGroup{r.GetWorkflowID(), r.GetEvent()}
+		k := runGroup{r.GetWorkflowID(), r.GetEvent(), r.GetHeadBranch()}
 		cur, ok := best[k]
 		if !ok {
 			order = append(order, k)
@@ -248,6 +260,9 @@ func (p *Provider) listJobs(ctx context.Context, repo ci.Repo, run *gogithub.Wor
 		}
 		jobs = append(jobs, res.Jobs...)
 		if resp.NextPage == 0 {
+			if res.GetTotalCount() > len(jobs) {
+				return nil, fmt.Errorf("jobs list is incomplete for %s run %d: received %d of %d", repo, run.GetID(), len(jobs), res.GetTotalCount())
+			}
 			return jobs, nil
 		}
 		opts.Page = resp.NextPage

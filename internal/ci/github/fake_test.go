@@ -20,6 +20,7 @@ type fakeRun struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion,omitempty"`
 	HeadSHA    string `json:"head_sha"`
+	HeadBranch string `json:"head_branch"`
 	RunNumber  int    `json:"run_number"`
 	RunAttempt int    `json:"run_attempt"`
 	HTMLURL    string `json:"html_url"`
@@ -60,6 +61,9 @@ type fakeGitHub struct {
 	// ignoreSHAFilter makes the fake return every run regardless of
 	// head_sha, to test the client's defensive filtering.
 	ignoreSHAFilter bool
+
+	// runsTotal and jobsTotal, when non-zero, override total_count.
+	runsTotal, jobsTotal int
 
 	// fail, when non-nil, answers every request instead of the fixtures.
 	fail func(w http.ResponseWriter, r *http.Request)
@@ -138,7 +142,11 @@ func (f *fakeGitHub) serveRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 	lo, hi := page(w, r, len(match))
-	writeJSON(w, map[string]any{"total_count": len(match), "workflow_runs": match[lo:hi]})
+	total := len(match)
+	if f.runsTotal != 0 {
+		total = f.runsTotal
+	}
+	writeJSON(w, map[string]any{"total_count": total, "workflow_runs": match[lo:hi]})
 }
 
 func (f *fakeGitHub) serveJobs(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +155,11 @@ func (f *fakeGitHub) serveJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := f.jobs[id]
 	f.mu.Unlock()
 	lo, hi := page(w, r, len(jobs))
-	writeJSON(w, map[string]any{"total_count": len(jobs), "jobs": jobs[lo:hi]})
+	total := len(jobs)
+	if f.jobsTotal != 0 {
+		total = f.jobsTotal
+	}
+	writeJSON(w, map[string]any{"total_count": total, "jobs": jobs[lo:hi]})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

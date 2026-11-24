@@ -16,7 +16,10 @@ import (
 // ErrNoToken means no token was found in the environment or via gh.
 var ErrNoToken = errors.New("no GitHub token found: set GH_TOKEN or GITHUB_TOKEN, or run `gh auth login`")
 
-const ghTimeout = 10 * time.Second
+const (
+	ghTimeout   = 10 * time.Second
+	ghWaitDelay = 2 * time.Second
+)
 
 // Token returns a GitHub token from GH_TOKEN, then GITHUB_TOKEN, then
 // `gh auth token --hostname github.com`. It never logs the token.
@@ -69,7 +72,12 @@ func runGh(ctx context.Context) (string, error) {
 	// path comes from LookPath and every argument is a constant.
 	cmd := exec.CommandContext(ctx, path, "auth", "token", "--hostname", "github.com") //nolint:gosec // G204: fixed arguments, binary resolved by LookPath
 	cmd.Stdout = &stdout
+	// A child that inherited stdout must not block us past the timeout.
+	cmd.WaitDelay = ghWaitDelay
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("gh auth token: %w", ctxErr)
+		}
 		return "", fmt.Errorf("gh auth token failed: %w", ErrNoToken)
 	}
 	return stdout.String(), nil
