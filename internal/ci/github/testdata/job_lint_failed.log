@@ -1,0 +1,25 @@
+﻿2026-11-24T10:00:00.1000000Z ##[group]Set up job
+2026-11-24T10:00:00.2000000Z Current runner version: '2.300.0'
+2026-11-24T10:00:01.9000000Z ##[endgroup]
+2026-11-24T10:00:02.3000000Z ##[group]Run actions/checkout@v4
+2026-11-24T10:00:02.4000000Z with:
+2026-11-24T10:00:02.5000000Z   repository: o/app
+2026-11-24T10:00:02.6000000Z ##[endgroup]
+2026-11-24T10:00:03.0000000Z Syncing repository: o/app
+2026-11-24T10:00:03.5000000Z Fetched src/secret.ts from the remote
+2026-11-24T10:00:03.9000000Z [command]/usr/bin/git log -1 --format=%H
+2026-11-24T10:00:04.2000000Z ##[group]Run npm run lint
+2026-11-24T10:00:04.2000001Z npm run lint
+2026-11-24T10:00:04.2000002Z shell: /usr/bin/bash -e {0}
+2026-11-24T10:00:04.2000003Z env:
+2026-11-24T10:00:04.2000004Z   CI: true
+2026-11-24T10:00:04.3000000Z ##[endgroup]
+2026-11-24T10:00:04.4000000Z > app@1.0.0 lint
+2026-11-24T10:00:04.5000000Z > eslint src
+2026-11-24T10:00:07.0000000Z [4m/home/runner/work/app/app/src/a.ts[24m
+2026-11-24T10:00:07.0000001Z   12:5  error  'x' is assigned a value but never used  no-unused-vars
+2026-11-24T10:00:08.0000000Z 
+2026-11-24T10:00:08.5000000Z ##[warning]1 problem found
+2026-11-24T10:00:09.9000000Z ##[error]Process completed with exit code 1.
+2026-11-24T10:00:10.0000000Z Post job cleanup.
+2026-11-24T10:00:10.1000000Z ##[group]Complete job
