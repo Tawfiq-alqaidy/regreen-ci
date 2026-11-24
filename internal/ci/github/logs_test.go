@@ -469,6 +469,7 @@ func TestFailureLogErrors(t *testing.T) {
 			}
 		}, "410"},
 		{"redirect to a non-http scheme", encodeID(lintRun, lintJob, 3), func(f *fakeGitHub) { f.logLocation = "ftp://example.test/log?sig=SECRETSIG" }, "scheme"},
+		{"http log on a non-loopback host", encodeID(lintRun, lintJob, 3), func(f *fakeGitHub) { f.logLocation = "http://blob.example/log?sig=SECRETSIG" }, "scheme"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -594,6 +595,11 @@ func TestCheckLogURL(t *testing.T) {
 		{"https", "https://pipelines.example/log?sig=x", false, false},
 		{"http refused by default", "http://pipelines.example/log", false, true},
 		{"http allowed for tests", "http://127.0.0.1:1234/log", true, false},
+		{"http to localhost allowed for tests", "http://localhost:1234/log", true, false},
+		{"http to ::1 allowed for tests", "http://[::1]:1234/log", true, false},
+		{"http to a non-loopback host refused even for tests", "http://pipelines.example/log", true, true},
+		{"http to a loopback-looking name refused", "http://localhost.pipelines.example/log", true, true},
+		{"http loopback refused by default", "http://127.0.0.1:1234/log", false, true},
 		{"ftp refused", "ftp://example/log", true, true},
 		{"file refused", "file:///etc/passwd", true, true},
 		{"no scheme", "//example/log", false, true},

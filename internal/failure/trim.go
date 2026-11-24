@@ -16,14 +16,27 @@ const lineCutMarker = " …[line cut]"
 // Non-positive limit fields take their DefaultLimits value, and MaxBytes is
 // raised to the smallest useful cap (the cut marker plus one rune). A line is
 // cut to MaxLineBytes (or less, so that it plus the marker fits MaxBytes) and
-// always carries the marker; nothing is ever cut inside a line without it. The returned
-// text never ends with a newline; truncated reports that anything was cut.
+// always carries the marker; nothing is ever cut inside a line without it.
+// When earlier lines are dropped, blank lines at the start of the kept tail
+// go too, and a header line counts them all. The returned text never ends
+// with a newline; truncated reports that anything was cut.
 func TrimLog(raw string, lim Limits) (text string, truncated bool) {
+	tail, dropped, truncated := trimLines(raw, lim)
+	out := strings.Join(tail, "\n")
+	if dropped > 0 {
+		out = fmt.Sprintf("[… %d earlier lines trimmed …]\n%s", dropped, out)
+	}
+	return out, truncated
+}
+
+// trimLines does TrimLog's work. It returns the kept lines and how many
+// earlier lines were dropped.
+func trimLines(raw string, lim Limits) (tail []string, dropped int, truncated bool) {
 	lim = withDefaults(lim)
 	lines := splitLines(sanitize(raw))
 	lines = tidyLines(lines)
 	if len(lines) == 0 {
-		return "", false
+		return nil, 0, false
 	}
 	// A cut line (content plus marker) must fit in MaxBytes, so that every
 	// cut inside a line is a marked one and the last line is always kept
@@ -42,15 +55,17 @@ func TrimLog(raw string, lim Limits) (text string, truncated bool) {
 		lines[i] = cutRunes(l, maxLine) + lineCutMarker
 	}
 	keep := tailThatFits(lines, lim)
-	if keep < len(lines) {
-		truncated = true
+	tail = lines[len(lines)-keep:]
+	dropped = len(lines) - keep
+	if dropped == 0 {
+		return tail, 0, truncated
 	}
-	tail := lines[len(lines)-keep:]
-	out := strings.Join(tail, "\n")
-	if dropped := len(lines) - keep; dropped > 0 {
-		out = fmt.Sprintf("[… %d earlier lines trimmed …]\n%s", dropped, out)
+	// The last line is never blank (tidyLines), so this stops.
+	for tail[0] == "" {
+		tail = tail[1:]
+		dropped++
 	}
-	return out, truncated
+	return tail, dropped, true
 }
 
 func withDefaults(lim Limits) Limits {

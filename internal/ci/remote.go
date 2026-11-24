@@ -49,6 +49,9 @@ func ParseRemote(remote string) (Repo, error) {
 		if !ok || user == "" {
 			return Repo{}, errors.New("scp-like remote needs a user@host form")
 		}
+		if !validUser(user) {
+			return Repo{}, errors.New("scp-like remote user has invalid characters")
+		}
 		host, path = h, p
 	}
 
@@ -67,13 +70,32 @@ func ParseRemote(remote string) (Repo, error) {
 	return Repo{Host: strings.ToLower(host), Owner: owner, Name: name}, nil
 }
 
+// validHost reports whether h is a dot-separated host name whose labels are
+// non-empty and made of letters, digits and hyphens. IP literals in brackets,
+// a trailing dot and empty labels are refused.
 func validHost(h string) bool {
-	if h == "" {
+	for label := range strings.SplitSeq(h, ".") {
+		if label == "" {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !isNameChar(c) || c == '_' || c == '.' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validUser reports whether the user of an scp-like remote matches
+// ^[A-Za-z0-9._-]+$.
+func validUser(u string) bool {
+	if u == "" {
 		return false
 	}
-	for i := 0; i < len(h); i++ {
-		c := h[i]
-		if !isNameChar(c) || c == '_' {
+	for i := 0; i < len(u); i++ {
+		if !isNameChar(u[i]) {
 			return false
 		}
 	}

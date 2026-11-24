@@ -26,6 +26,7 @@ func TestParseRemote(t *testing.T) {
 		{"case kept", "https://github.com/OwNer/NaMe", gh("OwNer", "NaMe")},
 		{"dots and underscores", "https://github.com/a.b_c/d-e.f", gh("a.b_c", "d-e.f")},
 		{"name ending in .git.git", "https://github.com/o/r.git.git", gh("o", "r.git")},
+		{"scp-like user with dot, dash and underscore", "my.git_user-1@github.com:o/r.git", gh("o", "r")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,6 +72,20 @@ func TestParseRemoteErrors(t *testing.T) {
 		{"scp empty host", "git@:o/r"},
 		{"scp empty user", "@github.com:o/r"},
 		{"bad port", "ssh://git@github.com:xx/o/r"},
+		{"trailing-dot host", "https://github.com./o/r"},
+		{"scp trailing-dot host", "git@github.com.:o/r"},
+		{"leading-dot host", "https://.github.com/o/r"},
+		{"double dot in host", "https://github..com/o/r"},
+		{"dot-only host", "https://./o/r"},
+		{"scp dot-only host", "git@..:o/r"},
+		{"ipv6 host", "https://[::1]/o/r"},
+		{"ipv6 host with port", "ssh://git@[2001:db8::1]:22/o/r"},
+		{"scp without user", "github.com:o/r"},
+		{"scp user with a space", "g it@github.com:o/r"},
+		{"scp user with a slash", "a/b@github.com:o/r"},
+		{"scp user with a percent", "git%40x@github.com:o/r"},
+		{"scp user with a plus", "git+ssh@github.com:o/r"},
+		{"scp user with a second at", "a@b@github.com:o/r"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

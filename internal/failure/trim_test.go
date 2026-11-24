@@ -91,6 +91,14 @@ func trimCases() []trimCase {
 			want: strings.Repeat("x", 1998) + lineCutMarker, truncated: true,
 		},
 		{name: "zero limits behave like defaults", in: "a\nb", lim: Limits{}, want: "a\nb"},
+		{
+			name: "blank lines at the start of the kept tail are dropped and counted", in: "a\n\n\nb", lim: Limits{MaxLines: 2},
+			want: "[… 3 earlier lines trimmed …]\nb", truncated: true,
+		},
+		{
+			name: "blank lines dropped after a byte cut", in: strings.Repeat("a", 15) + "\n\n\n" + strings.Repeat("b", 16), lim: Limits{MaxBytes: 30},
+			want: "[… 3 earlier lines trimmed …]\n" + strings.Repeat("b", 16), truncated: true,
+		},
 		{name: "marker not counted", in: "a\nb\nc", lim: Limits{MaxLines: 2}, want: "[… 1 earlier lines trimmed …]\nb\nc", truncated: true},
 	}
 }

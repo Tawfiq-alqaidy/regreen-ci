@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -32,7 +34,10 @@ type options struct {
 // Option configures New.
 type Option func(*options)
 
-// WithBaseURL overrides the API base URL, for tests. It must end with "/".
+// WithBaseURL overrides the API base URL, for tests. It must end with "/"
+// and use https, or http on a loopback host (localhost, 127.0.0.0/8, ::1);
+// New refuses anything else. With an http base, log downloads may use http
+// too, again only on a loopback host.
 func WithBaseURL(u string) Option { return func(o *options) { o.baseURL = u } }
 
 // WithHTTPClient sets the transport for API calls, for tests. go-github
@@ -44,7 +49,7 @@ func WithHTTPClient(c *http.Client) Option { return func(o *options) { o.httpCli
 // lives only inside the go-github client.
 type Provider struct {
 	client    *gogithub.Client
-	allowHTTP bool // the base URL is an http test server; log downloads may be http too
+	allowHTTP bool // the base URL is an http loopback test server; so may log downloads be
 }
 
 // New returns a provider that authenticates with token.
@@ -61,7 +66,20 @@ func New(token string, opts ...Option) (*Provider, error) {
 		gogithub.WithUserAgent(userAgent),
 		gogithub.WithTimeout(httpTimeout),
 	}
+	allowHTTP := false
 	if o.baseURL != "" {
+		u, err := url.Parse(o.baseURL)
+		if err != nil {
+			// url.Error quotes the input; do not wrap it.
+			return nil, errors.New("invalid base URL")
+		}
+		switch {
+		case u.Scheme == "https" && u.Host != "":
+		case u.Scheme == "http" && isLoopback(u.Hostname()):
+			allowHTTP = true
+		default:
+			return nil, errors.New("base URL must use https, or http on a loopback host")
+		}
 		copts = append(copts, gogithub.WithURLs(&o.baseURL, nil))
 	}
 	if o.httpClient != nil {
@@ -71,8 +89,17 @@ func New(token string, opts ...Option) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub client: %w", err)
 	}
-	allowHTTP := o.baseURL != "" && strings.HasPrefix(client.BaseURL(), "http://")
 	return &Provider{client: client, allowHTTP: allowHTTP}, nil
+}
+
+// isLoopback reports whether host is localhost or a loopback IP address
+// (127.0.0.0/8 or ::1).
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // String keeps %v and %+v from printing anything but the provider's name.

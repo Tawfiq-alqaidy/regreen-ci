@@ -253,13 +253,13 @@ func apiFailure(err error, resp *gogithub.Response) string {
 	return "request failed"
 }
 
-// checkLogURL accepts only https URLs, and http when allowHTTP is set. Its
-// errors never include the URL.
+// checkLogURL accepts only https URLs, and http to a loopback host when
+// allowHTTP is set. Its errors never include the URL.
 func checkLogURL(u *url.URL, allowHTTP bool) error {
 	switch {
 	case u.Host == "":
 		return errLogURLMissing
-	case u.Scheme == "https", u.Scheme == "http" && allowHTTP:
+	case u.Scheme == "https", u.Scheme == "http" && allowHTTP && isLoopback(u.Hostname()):
 		return nil
 	}
 	return errLogURLScheme

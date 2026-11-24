@@ -81,6 +81,48 @@ func TestNewRejectsEmptyToken(t *testing.T) {
 	}
 }
 
+func TestNewBaseURL(t *testing.T) {
+	tests := []struct {
+		base      string
+		ok        bool
+		allowHTTP bool
+	}{
+		{"https://ghe.example/api/v3/", true, false},
+		{"http://127.0.0.1:1/", true, true},
+		{"http://127.5.6.7/", true, true},
+		{"http://localhost:8080/", true, true},
+		{"http://LOCALHOST/", true, true},
+		{"http://[::1]:1/", true, true},
+		{"http://ghe.example/api/v3/", false, false},
+		{"http://localhost.ghe.example/", false, false},
+		{"http://0.0.0.0/", false, false},
+		{"http://10.0.0.1/", false, false},
+		{"ftp://127.0.0.1/", false, false},
+		{"https:///", false, false},
+		{"127.0.0.1/", false, false},
+		{"http://user:secret@ghe.example/", false, false},
+		{"http://%zz/", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.base, func(t *testing.T) {
+			p, err := New(testToken, WithBaseURL(tt.base))
+			if (err == nil) != tt.ok {
+				t.Fatalf("New(WithBaseURL(%q)) error = %v, want ok %v", tt.base, err, tt.ok)
+			}
+			if err != nil {
+				noLeak(t, err)
+				if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "%zz") {
+					t.Errorf("error echoes the base URL: %v", err)
+				}
+				return
+			}
+			if p.allowHTTP != tt.allowHTTP {
+				t.Errorf("allowHTTP = %v, want %v", p.allowHTTP, tt.allowHTTP)
+			}
+		})
+	}
+}
+
 func TestProviderDoesNotPrintToken(t *testing.T) {
 	p, err := New(testToken, WithBaseURL("http://127.0.0.1:1/"))
 	if err != nil {
@@ -109,7 +151,7 @@ func TestRequestsCarryAuthAndQuery(t *testing.T) {
 	if r.Auth != "Bearer "+testToken {
 		t.Fatalf("Authorization = %q", r.Auth)
 	}
-	if r.Query["head_sha"][0] != testSHA || r.Query["per_page"][0] != "100" {
+	if r.Query.Get("head_sha") != testSHA || r.Query.Get("per_page") != "100" {
 		t.Fatalf("query = %v", r.Query)
 	}
 }
@@ -198,7 +240,7 @@ func TestFailedStepEntry(t *testing.T) {
 	}
 	reqs := f.allRequests()
 	jr := reqs[len(reqs)-1]
-	if jr.Path != "/repos/o/r/actions/runs/100/jobs" || jr.Query["filter"][0] != "latest" || jr.Query["per_page"][0] != "100" {
+	if jr.Path != "/repos/o/r/actions/runs/100/jobs" || jr.Query.Get("filter") != "latest" || jr.Query.Get("per_page") != "100" {
 		t.Fatalf("jobs request = %+v", jr)
 	}
 	if jr.Auth != "Bearer "+testToken {
