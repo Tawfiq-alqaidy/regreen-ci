@@ -69,6 +69,10 @@ func trimCases() []trimCase {
 			name: "single last line over byte cap", in: "x\nabcdéfgh", lim: Limits{MaxBytes: 5, MaxLineBytes: 100},
 			want: "[… 1 earlier lines trimmed …]\nabcd", truncated: true,
 		},
+		{
+			name: "byte cap smaller than one rune", in: "0\n\xff", lim: Limits{MaxBytes: 1},
+			want: "[… 1 earlier lines trimmed …]\n\uFFFD", truncated: true,
+		},
 		{name: "zero limits behave like defaults", in: "a\nb", lim: Limits{}, want: "a\nb"},
 		{name: "marker not counted", in: "a\nb\nc", lim: Limits{MaxLines: 2}, want: "[… 1 earlier lines trimmed …]\nb\nc", truncated: true},
 	}

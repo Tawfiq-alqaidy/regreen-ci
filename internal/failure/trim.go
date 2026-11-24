@@ -33,7 +33,14 @@ func TrimLog(raw string, lim Limits) (text string, truncated bool) {
 	}
 	tail := lines[len(lines)-keep:]
 	if len(tail) == 1 && len(tail[0]) > lim.MaxBytes {
-		tail[0] = cutRunes(tail[0], lim.MaxBytes)
+		full := tail[0]
+		tail[0] = cutRunes(full, lim.MaxBytes)
+		if tail[0] == "" {
+			// Not even one rune fits; keep it anyway so the output of
+			// non-empty input is never empty.
+			_, size := utf8.DecodeRuneInString(full)
+			tail[0] = full[:size]
+		}
 		truncated = true
 	}
 	out := strings.Join(tail, "\n")

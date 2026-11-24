@@ -9,15 +9,15 @@ import (
 const maxTokenBytes = 4096
 
 // ExtractFiles returns the known files mentioned in text, sorted and unique,
-// at most max (non-positive means DefaultLimits().MaxFiles). Only tokens that
+// at most maxFiles (non-positive means DefaultLimits().MaxFiles). Only tokens that
 // name a file in known count; the filesystem is never consulted. A path
 // containing whitespace cannot match, because whitespace splits tokens.
-func ExtractFiles(text string, known map[string]struct{}, max int) []string {
+func ExtractFiles(text string, known map[string]struct{}, maxFiles int) []string {
 	if len(known) == 0 {
 		return nil
 	}
-	if max <= 0 {
-		max = DefaultLimits().MaxFiles
+	if maxFiles <= 0 {
+		maxFiles = DefaultLimits().MaxFiles
 	}
 	found := map[string]struct{}{}
 	for _, tok := range strings.FieldsFunc(text, isDelimiter) {
@@ -33,8 +33,8 @@ func ExtractFiles(text string, known map[string]struct{}, max int) []string {
 		out = append(out, f)
 	}
 	sort.Strings(out)
-	if len(out) > max {
-		out = out[:max]
+	if len(out) > maxFiles {
+		out = out[:maxFiles]
 	}
 	return out
 }
