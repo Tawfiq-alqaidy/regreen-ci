@@ -524,3 +524,63 @@ func TestForeignRunsDroppedByTheFilterDoNotLookIncomplete(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// conclusionCases lists GitHub conclusions and whether each counts as
+// passing. Anything not known to pass fails, unknown values included.
+var conclusionCases = []struct {
+	conclusion string
+	passes     bool
+}{
+	{"failure", false},
+	{"timed_out", false},
+	{"cancelled", false},
+	{"startup_failure", false},
+	{"action_required", false},
+	{"stale", false},
+	{"", false},
+	{"something_new", false},
+	{"success", true},
+	{"skipped", true},
+	{"neutral", true},
+}
+
+func TestRunConclusionMapping(t *testing.T) {
+	for _, tc := range conclusionCases {
+		t.Run(fmt.Sprintf("%q", tc.conclusion), func(t *testing.T) {
+			f := newFakeGitHub(t)
+			f.runs = []fakeRun{run(5, 5, "push", "completed", tc.conclusion, 1)}
+			got := status(t, newTestProvider(t, f))
+			want := ci.StatusFailure
+			if tc.passes {
+				want = ci.StatusSuccess
+			}
+			if got.Status != want {
+				t.Fatalf("run conclusion %q: status %s, want %s", tc.conclusion, got.Status, want)
+			}
+			if !tc.passes && (len(got.Failed) != 1 || got.Failed[0].ID != "gha-5-0-0") {
+				t.Fatalf("run conclusion %q: Failed = %+v, want the run-level entry", tc.conclusion, got.Failed)
+			}
+		})
+	}
+}
+
+func TestJobConclusionMapping(t *testing.T) {
+	for _, tc := range conclusionCases {
+		t.Run(fmt.Sprintf("%q", tc.conclusion), func(t *testing.T) {
+			f := newFakeGitHub(t)
+			f.runs = []fakeRun{failedRun(5)}
+			f.jobs[5] = []fakeJob{{
+				ID: 10, Name: "j", Status: "completed", Conclusion: tc.conclusion,
+				Steps: []fakeStep{{Name: "s", Number: 1, Status: "completed", Conclusion: "success"}},
+			}}
+			got := status(t, newTestProvider(t, f))
+			want := "gha-5-10-0" // the job is counted as failing
+			if tc.passes {
+				want = "gha-5-0-0" // no failing job: the run itself is reported
+			}
+			if got.Status != ci.StatusFailure || len(got.Failed) != 1 || got.Failed[0].ID != want {
+				t.Fatalf("job conclusion %q: Failed = %+v, want one entry %s", tc.conclusion, got.Failed, want)
+			}
+		})
+	}
+}
