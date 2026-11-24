@@ -87,13 +87,21 @@ type runGroup struct {
 	branch     string
 }
 
-// CommitStatus reports the aggregate GitHub Actions state of commit.
-func (p *Provider) CommitStatus(ctx context.Context, repo ci.Repo, commit string) (ci.CommitStatus, error) {
+// validateRepo accepts only a complete github.com repository.
+func validateRepo(repo ci.Repo) error {
 	if repo.Host != hostGitHub {
-		return ci.CommitStatus{}, fmt.Errorf("host %q is not supported: only github.com", repo.Host)
+		return fmt.Errorf("host %q is not supported: only github.com", repo.Host)
 	}
 	if repo.Owner == "" || repo.Name == "" {
-		return ci.CommitStatus{}, fmt.Errorf("repository owner and name must not be empty: %q", repo.String())
+		return fmt.Errorf("repository owner and name must not be empty: %q", repo.String())
+	}
+	return nil
+}
+
+// CommitStatus reports the aggregate GitHub Actions state of commit.
+func (p *Provider) CommitStatus(ctx context.Context, repo ci.Repo, commit string) (ci.CommitStatus, error) {
+	if err := validateRepo(repo); err != nil {
+		return ci.CommitStatus{}, err
 	}
 	if !ci.ValidCommit(commit) {
 		return ci.CommitStatus{}, errors.New("commit must be a full 40 or 64 character hex object name")

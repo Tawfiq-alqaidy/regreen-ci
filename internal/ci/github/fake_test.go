@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync"
 	"testing"
@@ -48,7 +49,7 @@ type fakeJob struct {
 
 type fakeRequest struct {
 	Path  string
-	Query map[string][]string
+	Query url.Values
 	Auth  string
 }
 
@@ -71,6 +72,9 @@ type fakeGitHub struct {
 	// logLocation, when non-empty, replaces the redirect target of every
 	// job log request.
 	logLocation string
+
+	// noLocation makes job log requests answer 302 without a Location.
+	noLocation bool
 
 	// slowHit receives a value whenever /slow is requested.
 	slowHit chan struct{}
@@ -99,6 +103,8 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/jobs/{id}/logs", f.serveJobLogs)
 	mux.HandleFunc("GET /download/{id}", f.serveDownload)
 	mux.HandleFunc("GET /slow", f.serveSlow)
+	mux.HandleFunc("GET /chain/{n}/{id}", f.serveChain)
+	mux.HandleFunc("GET /redirect", f.serveRedirect)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, fakeRequest{r.URL.Path, r.URL.Query(), r.Header.Get("Authorization")})
@@ -207,8 +213,11 @@ func (f *fakeGitHub) serveJobLogs(w http.ResponseWriter, r *http.Request) {
 	if f.logLocation != "" {
 		loc = f.logLocation
 	}
+	noLocation := f.noLocation
 	f.mu.Unlock()
-	w.Header().Set("Location", loc)
+	if !noLocation {
+		w.Header().Set("Location", loc)
+	}
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -227,6 +236,26 @@ func (f *fakeGitHub) serveDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(body)
+}
+
+// serveChain redirects n more times (keeping the signature) and then serves
+// the job's log like /download/{id}.
+func (f *fakeGitHub) serveChain(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.PathValue("n"))
+	id := r.PathValue("id")
+	if n <= 0 {
+		r.SetPathValue("id", id)
+		f.serveDownload(w, r)
+		return
+	}
+	w.Header().Set("Location", fmt.Sprintf("/chain/%d/%s?sig=SECRETSIG", n-1, id))
+	w.WriteHeader(http.StatusFound)
+}
+
+// serveRedirect answers 302 with the raw Location given in ?to=.
+func (f *fakeGitHub) serveRedirect(w http.ResponseWriter, r *http.Request) {
+	w.Header()["Location"] = []string{r.URL.Query().Get("to")}
+	w.WriteHeader(http.StatusFound)
 }
 
 // serveSlow announces itself on slowHit, then holds the request open until

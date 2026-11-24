@@ -507,3 +507,20 @@ func TestWithHTTPClientIsUsedAndNotModified(t *testing.T) {
 		t.Fatalf("Authorization = %q", reqs[0].Auth)
 	}
 }
+
+func TestForeignRunsDroppedByTheFilterDoNotLookIncomplete(t *testing.T) {
+	f := newFakeGitHub(t)
+	// More runs than fit on one page, all but one for another commit. The
+	// listing is complete: total_count counts what the API returned, and the
+	// defensive head_sha filter must not make the client think it is short.
+	f.ignoreSHAFilter = true
+	f.runs = append(f.runs, okRun(1))
+	for i := range int64(perPage + 1) {
+		other := okRun(100 + i)
+		other.HeadSHA = otherSHA
+		f.runs = append(f.runs, other)
+	}
+	if got := status(t, newTestProvider(t, f)); got.Status != ci.StatusSuccess {
+		t.Fatalf("got %+v", got)
+	}
+}

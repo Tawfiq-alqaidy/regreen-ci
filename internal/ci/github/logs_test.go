@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -235,7 +236,7 @@ func TestFailureLogReturnsTheFailedStep(t *testing.T) {
 			if r.Auth != "" {
 				t.Errorf("download request carried Authorization %q", r.Auth)
 			}
-			if r.Query["sig"][0] != "SECRETSIG" {
+			if r.Query.Get("sig") != "SECRETSIG" {
 				t.Errorf("download request lost its signature: %v", r.Query)
 			}
 			continue
@@ -476,5 +477,145 @@ func TestFailureLogFeedsFailureBuild(t *testing.T) {
 	}
 	if !strings.Contains(got.Errors, "no-unused-vars") {
 		t.Errorf("Errors lost the lint message: %q", got.Errors)
+	}
+}
+
+// --- redirect limits and error hygiene ---
+
+// logsAt makes the fake's log request redirect to path on the fake server.
+func logsAt(f *fakeGitHub, path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logLocation = f.srv.URL + path
+}
+
+func TestFailureLogDownloadRedirects(t *testing.T) {
+	id := encodeID(lintRun, lintJob, 3)
+	t.Run("two redirects succeed", func(t *testing.T) {
+		f, p := lintFake(t)
+		logsAt(f, fmt.Sprintf("/chain/2/%d?sig=SECRETSIG", lintJob))
+		got, err := failureLog(t, p, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, "src/a.ts") {
+			t.Errorf("log lost its content: %q", got)
+		}
+	})
+	t.Run("three redirects fail", func(t *testing.T) {
+		f, p := lintFake(t)
+		logsAt(f, fmt.Sprintf("/chain/3/%d?sig=SECRETSIG", lintJob))
+		_, err := failureLog(t, p, id)
+		if err == nil || !strings.Contains(err.Error(), "too many redirects") {
+			t.Fatalf("err = %v, want too many redirects", err)
+		}
+		noSignedURL(t, err)
+	})
+	t.Run("hop to a non-http scheme is stopped by the per-hop check", func(t *testing.T) {
+		f, p := lintFake(t)
+		// The first URL passes the pre-request check; only the redirect
+		// target is ftp, so the error can only come from CheckRedirect.
+		logsAt(f, "/redirect?to="+url.QueryEscape("ftp://blob.example/log?sig=SECRETSIG"))
+		_, err := failureLog(t, p, id)
+		if err == nil || !errors.Is(err, errLogURLScheme) {
+			t.Fatalf("err = %v, want the scheme error", err)
+		}
+		noSignedURL(t, err)
+		if n := f.requestCount("/redirect"); n != 1 {
+			t.Errorf("/redirect requested %d times, want 1 (the hop must be reached)", n)
+		}
+	})
+	t.Run("malformed Location from the download host", func(t *testing.T) {
+		f, p := lintFake(t)
+		logsAt(f, "/redirect?to="+url.QueryEscape("http://blob.example/%zz?sig=SECOND_HOP_SECRET"))
+		_, err := failureLog(t, p, id)
+		if err == nil {
+			t.Fatal("no error")
+		}
+		for _, bad := range []string{"SECOND_HOP_SECRET", "SECRETSIG", "blob.example", "%zz"} {
+			if strings.Contains(err.Error(), bad) {
+				t.Errorf("error contains %q: %v", bad, err)
+			}
+		}
+		if !strings.Contains(err.Error(), "download failed") {
+			t.Errorf("err = %v, want the fixed message", err)
+		}
+	})
+}
+
+func TestFailureLogMissingLocation(t *testing.T) {
+	f, p := lintFake(t)
+	f.noLocation = true
+	got, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
+	if err == nil || !strings.Contains(err.Error(), "log download URL is missing") {
+		t.Fatalf("got %q, %v; want the missing URL error", got, err)
+	}
+	if n := f.requestCount("/jobs/7001"); n != 1 {
+		t.Errorf("job endpoint requested %d times: the API root must not be fetched as a log", n)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout http://x/?sig=SECRETSIG" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return false }
+
+func TestFailureLogLocationRequestNetworkErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}, "network error"},
+		{"timeout", &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}, "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, _ := lintFake(t)
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(r.URL.Path, "/logs") {
+					return nil, tt.err
+				}
+				return http.DefaultTransport.RoundTrip(r)
+			})}
+			p, err := New(testToken, WithBaseURL(f.baseURL()), WithHTTPClient(client))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = failureLog(t, p, encodeID(lintRun, lintJob, 3))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+			for _, bad := range []string{"dial", "tcp", "http://", "refused", "i/o"} {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("error quotes the cause (%q): %v", bad, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCRLFLogs(t *testing.T) {
+	const a = "2026-11-24T10:00:04.0000000Z"
+	const b = "2026-11-24T10:00:10.0000000Z"
+	raw := bom + a + " ##[group]Run x\r\n" + a + " ##[endgroup]\r\n" + a + " ##[error]boom\r\n" +
+		"2026-11-24T10:00:05.0000000Z\r\n" + b + " after\r\n"
+
+	section := stepSection(raw, step3Start, step3End)
+	if strings.Contains(section, "after") {
+		t.Errorf("window ignored on CRLF input: %q", section)
+	}
+	if !strings.Contains(section, "2026-11-24T10:00:05.0000000Z\r\n") {
+		t.Errorf("timestamp-only CRLF line was not recognised as a timestamp line: %q", section)
+	}
+	got := stripFraming(section)
+	want := "Run x\r\nerror: boom\r\n\r\n"
+	if got != want {
+		t.Errorf("stripFraming = %q, want %q", got, want)
 	}
 }

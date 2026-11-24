@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Tawfiq-alqaidy/regreen-ci/internal/ci"
+	gogithub "github.com/google/go-github/v93/github"
 )
 
 const (
@@ -25,16 +27,21 @@ const (
 	readChunk            = 32 << 10
 )
 
+// Causes the download may report. Their texts are fixed: nothing taken from
+// the signed URL or from a server's response ever reaches an error.
+var (
+	errLogURLMissing    = errors.New("log download URL is missing")
+	errLogURLScheme     = errors.New("log download URL scheme is not allowed")
+	errTooManyRedirects = errors.New("too many redirects")
+)
+
 // FailureLog returns the log lines of the failed step named by id, without
 // GitHub's framing. A failure with no job (a run-level failure) has no log
 // and yields "". The download URL is a signed secret: it never appears in an
 // error, and the API token is never sent to it.
 func (p *Provider) FailureLog(ctx context.Context, repo ci.Repo, id string) (string, error) {
-	if repo.Host != hostGitHub {
-		return "", fmt.Errorf("host %q is not supported: only github.com", repo.Host)
-	}
-	if repo.Owner == "" || repo.Name == "" {
-		return "", fmt.Errorf("repository owner and name must not be empty: %q", repo.String())
+	if err := validateRepo(repo); err != nil {
+		return "", err
 	}
 	runID, jobID, step, err := parseID(id)
 	if err != nil {
@@ -70,17 +77,18 @@ func (p *Provider) FailureLog(ctx context.Context, repo ci.Repo, id string) (str
 
 // downloadLog fetches the job log, keeping at most maxLogBytes of its tail.
 func (p *Provider) downloadLog(ctx context.Context, repo ci.Repo, jobID int64) (string, error) {
-	// The URL is a signed secret, so every error below says what failed and,
-	// at most, the HTTP status; none wraps an error that may carry the URL.
+	// The URL is a signed secret, so every error below says what failed and
+	// at most a status or a fixed cause; none wraps an error whose text may
+	// carry the URL.
 	logURL, resp, err := p.client.Actions.GetWorkflowJobLogs(ctx, repo.Owner, repo.Name, jobID, maxDownloadRedirects)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", fmt.Errorf("request log location of job %d: %w", jobID, ctxErr)
+		if cause := ctxCause(err); cause != nil {
+			return "", fmt.Errorf("request log location of job %d: %w", jobID, cause)
 		}
-		if resp != nil && resp.Response != nil {
-			return "", fmt.Errorf("request log location of job %d of %s: HTTP status %d", jobID, repo, resp.StatusCode)
-		}
-		return "", fmt.Errorf("request log location of job %d of %s failed", jobID, repo)
+		return "", fmt.Errorf("request log location of job %d of %s: %s", jobID, repo, apiFailure(err, resp))
+	}
+	if logURL == nil || logURL.String() == "" {
+		return "", fmt.Errorf("log location of job %d: %w", jobID, errLogURLMissing)
 	}
 	base, err := url.Parse(p.client.BaseURL())
 	if err != nil {
@@ -98,7 +106,7 @@ func (p *Provider) downloadLog(ctx context.Context, repo ci.Repo, jobID int64) (
 		Timeout: httpTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxDownloadRedirects {
-				return errors.New("too many redirects")
+				return errTooManyRedirects
 			}
 			return checkLogURL(req.URL, allowHTTP)
 		},
@@ -110,15 +118,7 @@ func (p *Provider) downloadLog(ctx context.Context, repo ci.Repo, jobID int64) (
 	req.Header.Set("User-Agent", userAgent)
 	res, err := client.Do(req)
 	if err != nil {
-		// err is a *url.Error carrying the signed URL: keep only its cause.
-		if ue, ok := errors.AsType[*url.Error](err); ok {
-			err = ue.Err
-		} else if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
-		} else {
-			return "", fmt.Errorf("download log of job %d failed", jobID)
-		}
-		return "", fmt.Errorf("download log of job %d: %w", jobID, err)
+		return "", fmt.Errorf("download log of job %d: %w", jobID, downloadCause(err))
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
@@ -131,16 +131,70 @@ func (p *Provider) downloadLog(ctx context.Context, repo ci.Repo, jobID int64) (
 	return string(body), nil
 }
 
+// ctxCause returns the context error err stems from, or nil.
+func ctxCause(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// downloadCause reduces a failed download to an error with a fixed text. The
+// *url.Error client.Do returns carries the signed URL, and a cause from the
+// net/http machinery can quote a Location header, so only the causes listed
+// here pass through.
+func downloadCause(err error) error {
+	if cause := ctxCause(err); cause != nil {
+		return cause
+	}
+	for _, known := range []error{errTooManyRedirects, errLogURLScheme, errLogURLMissing} {
+		if errors.Is(err, known) {
+			return known
+		}
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		return errors.New("download timed out")
+	}
+	return errors.New("download failed")
+}
+
+// apiFailure describes a failed log-location request without quoting err,
+// which may contain the redirect target.
+func apiFailure(err error, resp *gogithub.Response) string {
+	if e, ok := errors.AsType[*gogithub.ErrorResponse](err); ok && e.Response != nil {
+		return fmt.Sprintf("HTTP status %d", e.Response.StatusCode)
+	}
+	if e, ok := errors.AsType[*gogithub.RateLimitError](err); ok && e.Response != nil {
+		return fmt.Sprintf("HTTP status %d", e.Response.StatusCode)
+	}
+	if e, ok := errors.AsType[*gogithub.AbuseRateLimitError](err); ok && e.Response != nil {
+		return fmt.Sprintf("HTTP status %d", e.Response.StatusCode)
+	}
+	if resp != nil && resp.Response != nil {
+		return fmt.Sprintf("HTTP status %d", resp.StatusCode)
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok {
+		if ne.Timeout() {
+			return "network error: timeout"
+		}
+		return "network error"
+	}
+	return "request failed"
+}
+
 // checkLogURL accepts only https URLs, and http when allowHTTP is set. Its
 // errors never include the URL.
 func checkLogURL(u *url.URL, allowHTTP bool) error {
 	switch {
 	case u.Host == "":
-		return errors.New("log URL has no host")
+		return errLogURLMissing
 	case u.Scheme == "https", u.Scheme == "http" && allowHTTP:
 		return nil
 	}
-	return fmt.Errorf("log URL scheme %q is not allowed", u.Scheme)
+	return errLogURLScheme
 }
 
 // readTail reads r to the end and returns its last limit bytes, starting at a
@@ -195,6 +249,11 @@ func splitTimestamp(line string) (t time.Time, rest string, ok bool) {
 	return t, rest, true
 }
 
+// lineBody is line without its line ending, "\n" or "\r\n".
+func lineBody(line string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+}
+
 // stepSection returns the lines of raw that belong to a step that ran from
 // start to end. The API reports times truncated to the second, so lines up to
 // one second past end are kept. A line without a timestamp belongs with the
@@ -209,7 +268,7 @@ func stepSection(raw string, start, end time.Time) string {
 	var kept strings.Builder
 	keep := false
 	for _, line := range strings.SplitAfter(raw, "\n") {
-		if t, _, ok := splitTimestamp(strings.TrimSuffix(line, "\n")); ok {
+		if t, _, ok := splitTimestamp(lineBody(line)); ok {
 			keep = !t.Before(start) && t.Before(limit)
 		}
 		if keep {
@@ -228,17 +287,16 @@ func stripFraming(section string) string {
 	var out strings.Builder
 	out.Grow(len(section))
 	for _, piece := range strings.SplitAfter(section, "\n") {
-		line, hadNewline := strings.CutSuffix(piece, "\n")
-		if _, rest, ok := splitTimestamp(line); ok {
-			line = rest
+		body := lineBody(piece)
+		ending := piece[len(body):] // "", "\n" or "\r\n", kept as it was
+		if _, rest, ok := splitTimestamp(body); ok {
+			body = rest
 		}
-		if line == "##[endgroup]" {
+		if body == "##[endgroup]" {
 			continue
 		}
-		out.WriteString(stripMarker(line))
-		if hadNewline {
-			out.WriteByte('\n')
-		}
+		out.WriteString(stripMarker(body))
+		out.WriteString(ending)
 	}
 	return out.String()
 }
