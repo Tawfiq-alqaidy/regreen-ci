@@ -37,7 +37,7 @@ func TestTokenLookupOrder(t *testing.T) {
 		{"GH_TOKEN wins", map[string]string{"GH_TOKEN": "test-gh", "GITHUB_TOKEN": "test-github"}, ghMustNotRun(t), "test-gh"},
 		{"GITHUB_TOKEN when GH_TOKEN empty", map[string]string{"GH_TOKEN": "", "GITHUB_TOKEN": "test-github"}, ghMustNotRun(t), "test-github"},
 		{"GITHUB_TOKEN when GH_TOKEN whitespace", map[string]string{"GH_TOKEN": " \t\n", "GITHUB_TOKEN": "test-github"}, ghMustNotRun(t), "test-github"},
-		{"value is trimmed", map[string]string{"GH_TOKEN": "  test-gh\n"}, ghMustNotRun(t), "test-gh"},
+		{"value is trimmed", map[string]string{"GH_TOKEN": " test-gh\t"}, ghMustNotRun(t), "test-gh"},
 		{"gh fallback", nil, ghReturning("test-from-gh\n", nil), "test-from-gh"},
 	}
 	for _, tc := range tests {

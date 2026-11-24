@@ -66,7 +66,8 @@ func runGh(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, ghTimeout)
 	defer cancel()
 	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, path, "auth", "token", "--hostname", "github.com")
+	// path comes from LookPath and every argument is a constant.
+	cmd := exec.CommandContext(ctx, path, "auth", "token", "--hostname", "github.com") //nolint:gosec // G204: fixed arguments, binary resolved by LookPath
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("gh auth token failed: %w", ErrNoToken)
