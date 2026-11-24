@@ -15,6 +15,12 @@ const maxTokenBytes = 4096
 // found.
 const maxSpecialPaths = 2000
 
+// secondPassBudget bounds the second pass of ExtractFiles: it is skipped when
+// len(text) times the number of paths it would search exceeds this many byte
+// comparisons. TrimLog's default 16 KiB excerpt with maxSpecialPaths paths
+// (32 Mi) fits.
+const secondPassBudget = 64 << 20
+
 // ExtractFiles returns the known files mentioned in text, sorted and unique,
 // at most maxFiles (non-positive means DefaultLimits().MaxFiles). Only paths
 // in known count; the filesystem is never consulted.
@@ -23,7 +29,8 @@ const maxSpecialPaths = 2000
 // and looks each token up. A second pass finds the known paths whose names
 // contain whitespace or a delimiter ("pages/[id].tsx", "docs/my file.md"),
 // which no token can hold; see findSpecial. It is skipped when known has
-// more than maxSpecialPaths such paths.
+// more than maxSpecialPaths such paths, or when len(text) times their number
+// exceeds secondPassBudget.
 func ExtractFiles(text string, known map[string]struct{}, maxFiles int) []string {
 	if len(known) == 0 {
 		return nil
@@ -42,12 +49,12 @@ func ExtractFiles(text string, known map[string]struct{}, maxFiles int) []string
 	found := map[string]struct{}{}
 	for _, line := range strings.Split(text, "\n") {
 		for _, tok := range lineTokens(line) {
-			if f, ok := lookup(tok, known, maxKey); ok {
+			if f, ok := lookup(tok.text, tok.mayBeAbsolute, known, maxKey); ok {
 				found[f] = struct{}{}
 			}
 		}
 	}
-	if len(special) > 0 && len(special) <= maxSpecialPaths {
+	if len(special) > 0 && len(special) <= maxSpecialPaths && len(text) <= secondPassBudget/len(special) {
 		findSpecial(text, special, found)
 	}
 	if len(found) == 0 {
@@ -68,21 +75,50 @@ func isDelimiter(r rune) bool {
 	return unicode.IsSpace(r) || strings.ContainsRune("\"'`()[]{}<>,;=|", r)
 }
 
-// lineTokens splits one line into tokens. A line cut by TrimLog ends in the
-// line-cut marker, and the token just before it may be a fragment of a longer
-// path (a cut "config.json" reads as the known "config.js"), so it is dropped.
-func lineTokens(line string) []string {
+// lineToken is one first-pass token of a line.
+type lineToken struct {
+	text string
+	// mayBeAbsolute is false when a closing delimiter (")", "]", "}" or
+	// ">") comes right before the token. Then the token continues a path
+	// such as "app/[locale]/src/a.ts", and its leading "/" does not make it
+	// absolute.
+	mayBeAbsolute bool
+}
+
+// lineTokens splits one line into tokens at whitespace and delimiters. A line
+// cut by TrimLog ends in the line-cut marker, and the token just before it may
+// be a fragment of a longer path (a cut "config.json" reads as the known
+// "config.js"), so it is dropped.
+func lineTokens(line string) []lineToken {
 	content, cut := strings.CutSuffix(line, lineCutMarker)
-	toks := strings.FieldsFunc(content, isDelimiter)
-	if cut && len(toks) > 0 {
-		if r, _ := utf8.DecodeLastRuneInString(content); !isDelimiter(r) {
+	var toks []lineToken
+	start := -1
+	var before rune // the rune before the current token, 0 at line start
+	for i, r := range content {
+		switch {
+		case isDelimiter(r) && start >= 0:
+			toks = append(toks, lineToken{content[start:i], !isClosing(before)})
+			start = -1
+		case !isDelimiter(r) && start < 0:
+			start = i
+			before, _ = utf8.DecodeLastRuneInString(content[:i])
+		}
+	}
+	if start >= 0 {
+		toks = append(toks, lineToken{content[start:], !isClosing(before)})
+		if cut {
 			toks = toks[:len(toks)-1]
 		}
 	}
 	return toks
 }
 
-func lookup(tok string, known map[string]struct{}, maxKey int) (string, bool) {
+func isClosing(r rune) bool { return r == ')' || r == ']' || r == '}' || r == '>' }
+
+// lookup returns the known path tok names: tok itself, or, when tok is an
+// absolute path and mayBeAbsolute is set, its longest known suffix after a
+// "/".
+func lookup(tok string, mayBeAbsolute bool, known map[string]struct{}, maxKey int) (string, bool) {
 	if len(tok) > maxTokenBytes {
 		return "", false
 	}
@@ -93,7 +129,7 @@ func lookup(tok string, known map[string]struct{}, maxKey int) (string, bool) {
 	if _, ok := known[tok]; ok {
 		return tok, true
 	}
-	if !isAbsolute(tok) {
+	if !mayBeAbsolute || !isAbsolute(tok) {
 		return "", false
 	}
 	// Only suffixes no longer than the longest known path can match.
@@ -171,9 +207,11 @@ const quoteChars = "\"'`"
 //     ": ( , ; )", but not right where a line was cut (the path may be a
 //     fragment of a longer one), and
 //   - it starts a line, follows whitespace, a quote or one of "( [ < =", or
-//     follows "/" where the text from the start of its first-pass token to
-//     the occurrence is an absolute path ("/..." or "X:/...") or only "./"
-//     prefixes, without a ".." segment.
+//     follows "/" where the run before it is an absolute path ("/..." or
+//     "X:/...") or only "./" prefixes, without a ".." segment. The run
+//     starts after the last whitespace, quote or "( [ < =" before the
+//     occurrence; a closing delimiter such as "]" or ")" does not start one,
+//     so "app/[locale]/blog/[id]/page.tsx" does not name "blog/[id]/page.tsx".
 //
 // Backslashes count as slashes. Each path costs one linear scan of the text.
 func findSpecial(text string, paths []string, found map[string]struct{}) {
@@ -267,17 +305,25 @@ func bounded(norm string, cuts map[int]bool, i, j int, tr *tokenTracker) bool {
 	return false
 }
 
+// isRunBreak reports whether r ends the run that absoluteBefore inspects:
+// whitespace, a quote or an opening delimiter "( [ < =". Closing delimiters
+// and separators (") ] } > , ; |") do not, because what follows them can
+// still be part of the same relative path.
+func isRunBreak(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(quoteChars+"([<=", r)
+}
+
 // tokenTracker walks text once, left to right, tracking where the current
-// first-pass token starts and whether it has had a ".." segment.
+// run starts (see isRunBreak) and whether it has had a ".." segment.
 type tokenTracker struct {
 	text     string
 	pos      int // text[:pos] has been walked
-	start    int // start of the token that contains pos
+	start    int // start of the run that contains pos
 	segStart int // start of the current path segment
 	dotdot   bool
 }
 
-// absoluteBefore reports whether text[start:i], the part of i's token before
+// absoluteBefore reports whether text[start:i], the part of i's run before
 // i, is an absolute path or only "./" prefixes, with no ".." segment. text[i-1]
 // is '/'. Calls must come with non-decreasing i, which keeps the total work
 // linear.
@@ -285,7 +331,7 @@ func (t *tokenTracker) absoluteBefore(i int) bool {
 	for t.pos < i {
 		r, size := utf8.DecodeRuneInString(t.text[t.pos:])
 		switch {
-		case isDelimiter(r):
+		case isRunBreak(r):
 			t.start, t.segStart, t.dotdot = t.pos+size, t.pos+size, false
 		case r == '/':
 			if t.text[t.segStart:t.pos] == ".." {

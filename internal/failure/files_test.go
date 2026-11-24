@@ -164,6 +164,58 @@ func TestExtractFilesDelimiterNamesAreLinear(t *testing.T) {
 	}
 }
 
+// TestExtractFilesNoAbsoluteAfterClosingDelimiter covers relative paths whose
+// directories hold brackets: the part after "]" or ")" is not an absolute
+// path, so it must not suffix-match a known file.
+func TestExtractFilesNoAbsoluteAfterClosingDelimiter(t *testing.T) {
+	known := map[string]struct{}{
+		"pages/[id].tsx": {}, "blog/[id]/page.tsx": {}, "(auth)/page.tsx": {}, "src/a.ts": {},
+	}
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"second pass, bracket dir", "foo/[x]/pages/[id].tsx", nil},
+		{"second pass, locale dir", "app/[locale]/blog/[id]/page.tsx", nil},
+		{"second pass, route group", "app/(shop)/blog/[id]/page.tsx", nil},
+		{"second pass, odd dir", "rel/dir/x]/(auth)/page.tsx", nil},
+		{"second pass, stack frame", "    at f (/home/runner/work/app/app/pages/[id].tsx:3:5)", []string{"pages/[id].tsx"}},
+		{"first pass, locale dir", "app/[locale]/src/a.ts", nil},
+		{"first pass, after paren", "x)/src/a.ts", nil},
+		{"first pass, after brace", "a}/src/a.ts", nil},
+		{"first pass, after angle", "b>/src/a.ts", nil},
+		{"first pass, flag value", "--config=/home/runner/work/app/app/src/a.ts", []string{"src/a.ts"}},
+		{"first pass, in parens", "(/home/runner/work/app/app/src/a.ts)", []string{"src/a.ts"}},
+		{"first pass, quoted", `"/home/runner/work/app/app/src/a.ts"`, []string{"src/a.ts"}},
+		{"first pass, comma list", "/r/x/src/a.ts,/r/y/pages/[id].tsx", []string{"pages/[id].tsx", "src/a.ts"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractFiles(tc.text, known, 0); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ExtractFiles(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractFilesSecondPassBudget(t *testing.T) {
+	known := map[string]struct{}{"src/a.ts": {}}
+	for i := range maxSpecialPaths {
+		known[fmt.Sprintf("dir %04d/file.ts", i)] = struct{}{}
+	}
+	// 16 KiB (TrimLog's default cap) with 2000 such paths is in budget.
+	small := "dir 0007/file.ts src/a.ts\n" + strings.Repeat("x", 16<<10-27)
+	if got := ExtractFiles(small, known, 0); !reflect.DeepEqual(got, []string{"dir 0007/file.ts", "src/a.ts"}) {
+		t.Fatalf("in budget: got %q", got)
+	}
+	// Past the budget only the first pass runs.
+	big := small + strings.Repeat("y", secondPassBudget/maxSpecialPaths)
+	if got := ExtractFiles(big, known, 0); !reflect.DeepEqual(got, []string{"src/a.ts"}) {
+		t.Fatalf("over budget: got %q", got)
+	}
+}
+
 func TestExtractFilesNoKnown(t *testing.T) {
 	if got := ExtractFiles("src/a.ts", nil, 0); got != nil {
 		t.Fatalf("nil known: got %v", got)
