@@ -31,6 +31,9 @@ type fakeStep struct {
 	Number     int64  `json:"number"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion,omitempty"`
+
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
 }
 
 type fakeJob struct {
@@ -40,6 +43,7 @@ type fakeJob struct {
 	Conclusion string     `json:"conclusion,omitempty"`
 	HTMLURL    string     `json:"html_url"`
 	Steps      []fakeStep `json:"steps"`
+	RunID      int64      `json:"run_id,omitempty"`
 }
 
 type fakeRequest struct {
@@ -56,7 +60,20 @@ type fakeGitHub struct {
 	mu       sync.Mutex
 	runs     []fakeRun
 	jobs     map[int64][]fakeJob
+	jobByID  map[int64]fakeJob
+	logs     map[int64][]byte // job log bodies, served from /download/{id}
 	requests []fakeRequest
+
+	// downloadStatus, when set for a job, makes its download answer with
+	// that status instead of the log body.
+	downloadStatus map[int64]int
+
+	// logLocation, when non-empty, replaces the redirect target of every
+	// job log request.
+	logLocation string
+
+	// slowHit receives a value whenever /slow is requested.
+	slowHit chan struct{}
 
 	// ignoreSHAFilter makes the fake return every run regardless of
 	// head_sha, to test the client's defensive filtering.
@@ -71,10 +88,17 @@ type fakeGitHub struct {
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	f := &fakeGitHub{t: t, jobs: map[int64][]fakeJob{}}
+	f := &fakeGitHub{
+		t: t, jobs: map[int64][]fakeJob{}, jobByID: map[int64]fakeJob{},
+		logs: map[int64][]byte{}, downloadStatus: map[int64]int{}, slowHit: make(chan struct{}, 1),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runs", f.serveRuns)
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runs/{id}/jobs", f.serveJobs)
+	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/jobs/{id}", f.serveJob)
+	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/jobs/{id}/logs", f.serveJobLogs)
+	mux.HandleFunc("GET /download/{id}", f.serveDownload)
+	mux.HandleFunc("GET /slow", f.serveSlow)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, fakeRequest{r.URL.Path, r.URL.Query(), r.Header.Get("Authorization")})
@@ -160,6 +184,59 @@ func (f *fakeGitHub) serveJobs(w http.ResponseWriter, r *http.Request) {
 		total = f.jobsTotal
 	}
 	writeJSON(w, map[string]any{"total_count": total, "jobs": jobs[lo:hi]})
+}
+
+func (f *fakeGitHub) serveJob(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	f.mu.Lock()
+	job, ok := f.jobByID[id]
+	f.mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, job)
+}
+
+// serveJobLogs answers like GitHub: a 302 to a signed download URL on
+// another path. The signature must never show up in an error.
+func (f *fakeGitHub) serveJobLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	loc := fmt.Sprintf("http://%s/download/%s?sig=SECRETSIG", r.Host, id)
+	f.mu.Lock()
+	if f.logLocation != "" {
+		loc = f.logLocation
+	}
+	f.mu.Unlock()
+	w.Header().Set("Location", loc)
+	w.WriteHeader(http.StatusFound)
+}
+
+func (f *fakeGitHub) serveDownload(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	f.mu.Lock()
+	body, ok := f.logs[id]
+	status := f.downloadStatus[id]
+	f.mu.Unlock()
+	if status != 0 {
+		http.Error(w, "no log", status)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	_, _ = w.Write(body)
+}
+
+// serveSlow announces itself on slowHit, then holds the request open until
+// the client gives up.
+func (f *fakeGitHub) serveSlow(_ http.ResponseWriter, r *http.Request) {
+	select {
+	case f.slowHit <- struct{}{}:
+	default:
+	}
+	<-r.Context().Done()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

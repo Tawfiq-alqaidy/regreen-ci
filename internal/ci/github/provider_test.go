@@ -20,6 +20,8 @@ const (
 	otherSHA = "fedcba9876543210fedcba9876543210fedcba98"
 )
 
+var _ ci.Provider = (*Provider)(nil)
+
 var testRepo = ci.Repo{Host: "github.com", Owner: "o", Name: "r"}
 
 func newTestProvider(t *testing.T, f *fakeGitHub) *Provider {
