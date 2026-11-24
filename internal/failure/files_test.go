@@ -134,7 +134,7 @@ func TestNoMidLineCutWithoutMarker(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Build(ci.FailedStep{}, "c", tc.log, nil, known, tc.lim)
+			got := Build(ci.StepLog{Commit: "c", Log: tc.log}, nil, known, tc.lim)
 			if len(got.Files) != 0 {
 				t.Fatalf("Files = %v from %q", got.Files, got.Errors)
 			}

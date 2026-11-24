@@ -67,14 +67,15 @@ func TestStepSection(t *testing.T) {
 		raw        string
 		start, end time.Time
 		want       string
+		matched    bool
 	}{
-		{"zero start", lint, time.Time{}, step3End, wholeLint},
-		{"zero end", lint, step3Start, time.Time{}, wholeLint},
-		{"end before start", lint, step3End, step3Start, wholeLint},
-		{"no timestamps", plain, step3Start, step3End, wholePlain},
-		{"window matches nothing", lint, t0.Add(time.Hour), t0.Add(2 * time.Hour), wholeLint},
-		{"BOM removed", bom + "2026-11-24T10:00:04.0000000Z a\n", step3Start, step3End, "2026-11-24T10:00:04.0000000Z a\n"},
-		{"one BOM only", bom + bom + "x\n", time.Time{}, time.Time{}, bom + "x\n"},
+		{"zero start", lint, time.Time{}, step3End, wholeLint, false},
+		{"zero end", lint, step3Start, time.Time{}, wholeLint, false},
+		{"end before start", lint, step3End, step3Start, wholeLint, false},
+		{"no timestamps", plain, step3Start, step3End, wholePlain, false},
+		{"window matches nothing", lint, t0.Add(time.Hour), t0.Add(2 * time.Hour), wholeLint, false},
+		{"BOM removed", bom + "2026-11-24T10:00:04.0000000Z a\n", step3Start, step3End, "2026-11-24T10:00:04.0000000Z a\n", true},
+		{"one BOM only", bom + bom + "x\n", time.Time{}, time.Time{}, bom + "x\n", false},
 		{
 			"continuation lines stay with their line",
 			"2026-11-24T10:00:03.0000000Z before\n" +
@@ -83,31 +84,38 @@ func TestStepSection(t *testing.T) {
 				"2026-11-24T10:00:10.0000000Z after\ntail of after\n",
 			step3Start, step3End,
 			"2026-11-24T10:00:05.0000000Z first\nsecond\n  third\n2026-11-24T10:00:06.0000000Z next\n",
+			true,
 		},
 		{
 			"untimestamped lines before the first timestamp are dropped",
 			"orphan\n2026-11-24T10:00:05.0000000Z kept\n",
 			step3Start, step3End,
 			"2026-11-24T10:00:05.0000000Z kept\n",
+			true,
 		},
 		{
 			"start is inclusive, end plus one second exclusive",
 			"2026-11-24T10:00:03.9999999Z a\n2026-11-24T10:00:04.0000000Z b\n2026-11-24T10:00:09.9999999Z c\n2026-11-24T10:00:10.0000000Z d\n",
 			step3Start, step3End,
 			"2026-11-24T10:00:04.0000000Z b\n2026-11-24T10:00:09.9999999Z c\n",
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := stepSection(tt.raw, tt.start, tt.end); got != tt.want {
-				t.Errorf("stepSection =\n%q\nwant\n%q", got, tt.want)
+			got, matched := stepSection(tt.raw, tt.start, tt.end)
+			if got != tt.want || matched != tt.matched {
+				t.Errorf("stepSection =\n%q, %v\nwant\n%q, %v", got, matched, tt.want, tt.matched)
 			}
 		})
 	}
 }
 
 func TestStepSectionSelectsStepThreeOfTheFixture(t *testing.T) {
-	got := stepSection(readFixture(t, "job_lint_failed.log"), step3Start, step3End)
+	got, matched := stepSection(readFixture(t, "job_lint_failed.log"), step3Start, step3End)
+	if !matched {
+		t.Fatal("window selected nothing")
+	}
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	if first := lines[0]; !strings.HasSuffix(first, "##[group]Run npm run lint") {
 		t.Errorf("first line = %q", first)
@@ -168,6 +176,7 @@ const (
 func lintFixtureJob() fakeJob {
 	return fakeJob{
 		ID: lintJob, RunID: lintRun, Name: "lint", Status: "completed", Conclusion: "failure",
+		HTMLURL: "https://example.test/job/7001", HeadSHA: testSHA, WorkflowName: "CI",
 		Steps: []fakeStep{
 			{Name: "Set up job", Number: 1, Status: "completed", Conclusion: "success", StartedAt: "2026-11-24T10:00:00Z", CompletedAt: "2026-11-24T10:00:02Z"},
 			{Name: "Run actions/checkout@v4", Number: 2, Status: "completed", Conclusion: "success", StartedAt: "2026-11-24T10:00:02Z", CompletedAt: "2026-11-24T10:00:04Z"},
@@ -185,7 +194,16 @@ func lintFake(t *testing.T) (*fakeGitHub, *Provider) {
 	return f, newTestProvider(t, f)
 }
 
-func failureLog(t *testing.T, p *Provider, id string) (string, error) {
+// cancelledJob is lintFixtureJob after a cancellation: it failed without a
+// failed step, so only its step-0 ID is valid.
+func cancelledJob() fakeJob {
+	j := lintFixtureJob()
+	j.Conclusion = "cancelled"
+	j.Steps[2].Conclusion = "cancelled"
+	return j
+}
+
+func failureLog(t *testing.T, p *Provider, id string) (ci.StepLog, error) {
 	t.Helper()
 	got, err := p.FailureLog(context.Background(), testRepo, id)
 	noLeak(t, err)
@@ -207,10 +225,18 @@ func noSignedURL(t *testing.T, err error) {
 
 func TestFailureLogReturnsTheFailedStep(t *testing.T) {
 	f, p := lintFake(t)
-	got, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
+	sl, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantStep := ci.FailedStep{
+		ID: "gha-500-7001-3", Workflow: "CI", Job: "lint", Step: "Run npm run lint", StepNumber: 3,
+		URL: "https://example.test/job/7001",
+	}
+	if sl.Step != wantStep || sl.Commit != testSHA || sl.Partial {
+		t.Errorf("Step = %+v, Commit = %q, Partial = %v; want %+v, %q, false", sl.Step, sl.Commit, sl.Partial, wantStep, testSHA)
+	}
+	got := sl.Log
 	if !strings.HasPrefix(got, "Run npm run lint\n") {
 		t.Errorf("log does not start with the step's group line:\n%s", got)
 	}
@@ -251,27 +277,79 @@ func TestFailureLogReturnsTheFailedStep(t *testing.T) {
 	}
 }
 
-func TestFailureLogWholeLogCases(t *testing.T) {
-	tests := []struct{ name, id string }{
-		{"step 0 means no step", encodeID(lintRun, lintJob, 0)},
-		{"unknown step number", encodeID(lintRun, lintJob, 99)},
+func TestFailureLogStepZeroIsTheWholeLog(t *testing.T) {
+	f, p := lintFake(t)
+	f.jobByID[lintJob] = cancelledJob()
+	sl, err := failureLog(t, p, encodeID(lintRun, lintJob, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sl.Partial || sl.Commit != testSHA || sl.Step.Step != "" || sl.Step.StepNumber != 0 || sl.Step.ID != "gha-500-7001-0" {
+		t.Errorf("unexpected StepLog fields: %+v", sl)
+	}
+	for _, want := range []string{"Set up job", "src/secret.ts", "src/a.ts", "Post job cleanup", "error: Process completed"} {
+		if !strings.Contains(sl.Log, want) {
+			t.Errorf("whole log misses %q", want)
+		}
+	}
+	for _, bad := range []string{"##[", "2026-11-24T", bom} {
+		if strings.Contains(sl.Log, bad) {
+			t.Errorf("log still has framing %q", bad)
+		}
+	}
+}
+
+func TestFailureLogCanonicalID(t *testing.T) {
+	_, p := lintFake(t)
+	sl, err := failureLog(t, p, "gha-0500-007001-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sl.Step.ID != "gha-500-7001-3" {
+		t.Errorf("ID = %q, want the canonical gha-500-7001-3", sl.Step.ID)
+	}
+}
+
+// TestFailureLogEmptyWindowIsPartial covers a numbered step whose time
+// window cannot select its lines: the log is empty and marked Partial, so
+// other steps' output never reaches Failure.Files.
+func TestFailureLogEmptyWindowIsPartial(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(f *fakeGitHub)
+	}{
+		{"window selects no line", func(f *fakeGitHub) {
+			j := lintFixtureJob()
+			j.Steps[2].StartedAt, j.Steps[2].CompletedAt = "2026-11-24T11:00:00Z", "2026-11-24T11:00:05Z"
+			f.jobByID[lintJob] = j
+		}},
+		{"log has no timestamps", func(f *fakeGitHub) {
+			f.logs[lintJob] = []byte(readFixture(f.t, "job_no_timestamps.log"))
+		}},
+		{"step times missing", func(f *fakeGitHub) {
+			j := lintFixtureJob()
+			j.Steps[2].StartedAt, j.Steps[2].CompletedAt = "", ""
+			f.jobByID[lintJob] = j
+		}},
+		{"step ends before it starts", func(f *fakeGitHub) {
+			j := lintFixtureJob()
+			j.Steps[2].StartedAt, j.Steps[2].CompletedAt = "2026-11-24T10:00:09Z", "2026-11-24T10:00:04Z"
+			f.jobByID[lintJob] = j
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, p := lintFake(t)
-			got, err := failureLog(t, p, tt.id)
+			f, p := lintFake(t)
+			tt.setup(f)
+			sl, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{"Set up job", "src/secret.ts", "src/a.ts", "Post job cleanup", "error: Process completed"} {
-				if !strings.Contains(got, want) {
-					t.Errorf("whole log misses %q", want)
-				}
+			if sl.Log != "" || !sl.Partial {
+				t.Errorf("Log = %q, Partial = %v; want empty and Partial", sl.Log, sl.Partial)
 			}
-			for _, bad := range []string{"##[", "2026-11-24T", bom} {
-				if strings.Contains(got, bad) {
-					t.Errorf("log still has framing %q", bad)
-				}
+			if sl.Commit != testSHA || sl.Step.Step != "Run npm run lint" {
+				t.Errorf("step binding lost: %+v", sl)
 			}
 		})
 	}
@@ -279,12 +357,93 @@ func TestFailureLogWholeLogCases(t *testing.T) {
 
 func TestFailureLogRunLevelFailureHasNoLog(t *testing.T) {
 	f, p := lintFake(t)
-	got, err := failureLog(t, p, encodeID(lintRun, 0, 0))
-	if err != nil || got != "" {
-		t.Fatalf("got %q, %v; want empty, nil", got, err)
+	got, err := failureLog(t, p, "gha-0500-0-0")
+	want := ci.StepLog{Step: ci.FailedStep{ID: "gha-500-0-0"}}
+	if err != nil || got != want {
+		t.Fatalf("got %+v, %v; want %+v, nil", got, err, want)
 	}
 	if n := len(f.allRequests()); n != 0 {
 		t.Errorf("%d requests made for a run-level failure", n)
+	}
+}
+
+// TestFailureLogRejectsIDsThatNameNoFailedStep covers IDs that parse but do
+// not name a failed step: they fail before any log is downloaded.
+func TestFailureLogRejectsIDsThatNameNoFailedStep(t *testing.T) {
+	withJob := func(edit func(j *fakeJob)) func(f *fakeGitHub) {
+		return func(f *fakeGitHub) {
+			j := lintFixtureJob()
+			edit(&j)
+			f.jobByID[lintJob] = j
+		}
+	}
+	tests := []struct {
+		name  string
+		step  int
+		setup func(f *fakeGitHub)
+		want  string
+	}{
+		{"passing step", 2, nil, errNotFailedStep.Error()},
+		{"step the job does not have", 99, nil, errNotFailedStep.Error()},
+		{"step 0 while a step failed", 0, nil, errNotFailedStep.Error()},
+		{"job in progress", 3, withJob(func(j *fakeJob) { j.Status, j.Conclusion = "in_progress", "" }), errNotFailedStep.Error()},
+		{"job queued", 3, withJob(func(j *fakeJob) { j.Status, j.Conclusion = "queued", "" }), errNotFailedStep.Error()},
+		{"job succeeded", 3, withJob(func(j *fakeJob) { j.Conclusion = "success" }), errNotFailedStep.Error()},
+		{"job skipped", 3, withJob(func(j *fakeJob) { j.Conclusion = "skipped" }), errNotFailedStep.Error()},
+		{"job neutral", 3, withJob(func(j *fakeJob) { j.Conclusion = "neutral" }), errNotFailedStep.Error()},
+		{"step 0 of a passing job", 0, withJob(func(j *fakeJob) {
+			j.Conclusion = "success"
+			j.Steps[2].Conclusion = "success"
+		}), errNotFailedStep.Error()},
+		{"step cancelled, not failed", 3, func(f *fakeGitHub) { f.jobByID[lintJob] = cancelledJob() }, errNotFailedStep.Error()},
+		{"head commit missing", 3, withJob(func(j *fakeJob) { j.HeadSHA = "" }), "no valid head commit"},
+		{"head commit abbreviated", 3, withJob(func(j *fakeJob) { j.HeadSHA = testSHA[:12] }), "no valid head commit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, p := lintFake(t)
+			if tt.setup != nil {
+				tt.setup(f)
+			}
+			sl, err := failureLog(t, p, encodeID(lintRun, lintJob, tt.step))
+			if err == nil || err.Error() != tt.want && !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %+v, %v; want error %q", sl, err, tt.want)
+			}
+			if sl != (ci.StepLog{}) {
+				t.Errorf("returned %+v alongside an error", sl)
+			}
+			if n := f.requestCount("/logs") + f.requestCount(fmt.Sprintf("/download/%d", lintJob)); n != 0 {
+				t.Errorf("%d log requests made for a rejected id", n)
+			}
+		})
+	}
+}
+
+// TestFailureLogMatchesCommitStatus resolves an ID CommitStatus issued, then
+// the same job with a step number that did not fail.
+func TestFailureLogMatchesCommitStatus(t *testing.T) {
+	f, p := lintFake(t)
+	r := failedRun(lintRun)
+	r.Name = "CI"
+	f.runs = []fakeRun{r}
+	f.jobs[lintRun] = []fakeJob{lintFixtureJob()}
+
+	st := status(t, p)
+	if len(st.Failed) != 1 {
+		t.Fatalf("Failed = %+v", st.Failed)
+	}
+	issued := st.Failed[0]
+	sl, err := failureLog(t, p, issued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sl.Step != issued || sl.Commit != st.Commit {
+		t.Errorf("resolved %+v on %q, CommitStatus issued %+v on %q", sl.Step, sl.Commit, issued, st.Commit)
+	}
+
+	forged := encodeID(lintRun, lintJob, 2)
+	if _, err := failureLog(t, p, forged); err == nil || err.Error() != errNotFailedStep.Error() {
+		t.Fatalf("forged id %s: err = %v, want %q", forged, err, errNotFailedStep)
 	}
 }
 
@@ -319,13 +478,13 @@ func TestFailureLogErrors(t *testing.T) {
 			}
 			got, err := failureLog(t, p, tt.id)
 			if err == nil {
-				t.Fatalf("no error, got %q", got)
+				t.Fatalf("no error, got %+v", got)
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q does not mention %q", err, tt.want)
 			}
-			if got != "" {
-				t.Errorf("returned text %q alongside an error", got)
+			if got != (ci.StepLog{}) {
+				t.Errorf("returned %+v alongside an error", got)
 			}
 		})
 	}
@@ -369,11 +528,16 @@ func TestFailureLogKeepsTheTailOfAHugeLog(t *testing.T) {
 	body := b.String()
 	last := body[strings.LastIndex(strings.TrimSuffix(body, "\n"), "\n")+1:]
 	f.logs[lintJob] = []byte(body)
+	f.jobByID[lintJob] = cancelledJob()
 
-	got, err := failureLog(t, p, encodeID(lintRun, lintJob, 0))
+	sl, err := failureLog(t, p, encodeID(lintRun, lintJob, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !sl.Partial {
+		t.Error("a log cut to its tail must be Partial")
+	}
+	got := sl.Log
 	if len(got) > maxLogBytes || len(got) < maxLogBytes-200 {
 		t.Errorf("len = %d, want just under %d", len(got), maxLogBytes)
 	}
@@ -394,26 +558,27 @@ func TestReadTail(t *testing.T) {
 		return b.String()
 	}
 	tests := []struct {
-		name string
-		in   string
-		max  int
-		want string
+		name    string
+		in      string
+		max     int
+		want    string
+		dropped bool
 	}{
-		{"under the cap", lines(3), 100, lines(3)},
-		{"exactly the cap", lines(5), 20, lines(5)},
-		{"over the cap drops the partial first line", lines(10), 14, "l07\nl08\nl09\n"},
-		{"many reads", lines(5000), 4000, lines(5000)[len(lines(5000))-3996:]},
-		{"empty", "", 10, ""},
-		{"no newline in the tail keeps the tail", strings.Repeat("a", 50), 10, strings.Repeat("a", 10)},
+		{"under the cap", lines(3), 100, lines(3), false},
+		{"exactly the cap", lines(5), 20, lines(5), false},
+		{"over the cap drops the partial first line", lines(10), 14, "l07\nl08\nl09\n", true},
+		{"many reads", lines(5000), 4000, lines(5000)[len(lines(5000))-3996:], true},
+		{"empty", "", 10, "", false},
+		{"no newline in the tail keeps the tail", strings.Repeat("a", 50), 10, strings.Repeat("a", 10), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := readTail(strings.NewReader(tt.in), tt.max)
+			got, dropped, err := readTail(strings.NewReader(tt.in), tt.max)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(got) != tt.want {
-				t.Errorf("readTail = %q, want %q", got, tt.want)
+			if string(got) != tt.want || dropped != tt.dropped {
+				t.Errorf("readTail = %q, %v; want %q, %v", got, dropped, tt.want, tt.dropped)
 			}
 		})
 	}
@@ -453,16 +618,17 @@ func TestCheckLogURL(t *testing.T) {
 
 func TestFailureLogFeedsFailureBuild(t *testing.T) {
 	_, p := lintFake(t)
-	id := encodeID(lintRun, lintJob, 3)
-	log, err := failureLog(t, p, id)
+	sl, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := ci.FailedStep{ID: id, Workflow: "CI", Job: "lint", Step: "Run npm run lint", StepNumber: 3}
 	checks := []config.Check{{Name: "lint", Run: "npm run lint"}}
 	known := map[string]struct{}{"src/a.ts": {}, "src/secret.ts": {}}
 
-	got := failure.Build(step, testSHA, log, checks, known, failure.DefaultLimits())
+	got := failure.Build(sl, checks, known, failure.DefaultLimits())
+	if got.Commit != testSHA || got.ID != "gha-500-7001-3" || got.Job != "lint" || got.Truncated {
+		t.Errorf("Build lost the binding: %+v", got)
+	}
 	if got.Check != "lint" || !got.Fixable {
 		t.Errorf("Check = %q, Fixable = %v; want lint, true", got.Check, got.Fixable)
 	}
@@ -498,8 +664,8 @@ func TestFailureLogDownloadRedirects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(got, "src/a.ts") {
-			t.Errorf("log lost its content: %q", got)
+		if !strings.Contains(got.Log, "src/a.ts") {
+			t.Errorf("log lost its content: %q", got.Log)
 		}
 	})
 	t.Run("three redirects fail", func(t *testing.T) {
@@ -543,15 +709,38 @@ func TestFailureLogDownloadRedirects(t *testing.T) {
 	})
 }
 
+// TestFailureLogMissingLocation covers a log location that is absent or not
+// an absolute URL with a host. A relative one must not be resolved against
+// the API base and fetched from there.
 func TestFailureLogMissingLocation(t *testing.T) {
-	f, p := lintFake(t)
-	f.noLocation = true
-	got, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
-	if err == nil || !strings.Contains(err.Error(), "log download URL is missing") {
-		t.Fatalf("got %q, %v; want the missing URL error", got, err)
+	tests := []struct {
+		name  string
+		setup func(f *fakeGitHub)
+	}{
+		{"no Location header", func(f *fakeGitHub) { f.noLocation = true }},
+		{"empty Location", func(f *fakeGitHub) { f.emptyLocation = true }},
+		{"relative API path", func(f *fakeGitHub) { f.logLocation = "repos/o/r/actions/jobs/7001" }},
+		{"dot", func(f *fakeGitHub) { f.logLocation = "." }},
+		{"slash", func(f *fakeGitHub) { f.logLocation = "/" }},
+		{"scheme without host", func(f *fakeGitHub) { f.logLocation = "https:///download/7001" }},
 	}
-	if n := f.requestCount("/jobs/7001"); n != 1 {
-		t.Errorf("job endpoint requested %d times: the API root must not be fetched as a log", n)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, p := lintFake(t)
+			tt.setup(f)
+			got, err := failureLog(t, p, encodeID(lintRun, lintJob, 3))
+			if err == nil || !strings.Contains(err.Error(), "log download URL is missing") {
+				t.Fatalf("got %+v, %v; want the missing URL error", got, err)
+			}
+			var paths []string
+			for _, r := range f.allRequests() {
+				paths = append(paths, r.Path)
+			}
+			want := []string{"/repos/o/r/actions/jobs/7001", "/repos/o/r/actions/jobs/7001/logs"}
+			if !reflect.DeepEqual(paths, want) {
+				t.Errorf("requests = %q, want exactly %q", paths, want)
+			}
+		})
 	}
 }
 
@@ -606,7 +795,7 @@ func TestCRLFLogs(t *testing.T) {
 	raw := bom + a + " ##[group]Run x\r\n" + a + " ##[endgroup]\r\n" + a + " ##[error]boom\r\n" +
 		"2026-11-24T10:00:05.0000000Z\r\n" + b + " after\r\n"
 
-	section := stepSection(raw, step3Start, step3End)
+	section, _ := stepSection(raw, step3Start, step3End)
 	if strings.Contains(section, "after") {
 		t.Errorf("window ignored on CRLF input: %q", section)
 	}

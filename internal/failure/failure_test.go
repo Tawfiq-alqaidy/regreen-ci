@@ -17,7 +17,7 @@ func TestBuildMapped(t *testing.T) {
 	step := ci.FailedStep{ID: "id-1", Workflow: "CI", Job: "build", Step: "Run npm run lint", StepNumber: 4, URL: "https://ci.example/1"}
 	checks := []config.Check{{Name: "lint", Run: "npm run lint", Fix: "npm run lint -- --fix"}}
 	log := "\x1b[31m/home/runner/work/app/app/src/a.ts:12:5\x1b[0m error\nsee main.go:3"
-	got := Build(step, "abc123", log, checks, knownSet(), DefaultLimits())
+	got := Build(ci.StepLog{Step: step, Commit: "abc123", Log: log}, checks, knownSet(), DefaultLimits())
 	want := Failure{
 		ID: "id-1", Commit: "abc123", Workflow: "CI", Job: "build", Step: "Run npm run lint", URL: "https://ci.example/1",
 		Check: "lint", Command: "npm run lint", Fixable: true,
@@ -32,7 +32,7 @@ func TestBuildMapped(t *testing.T) {
 func TestBuildUnmapped(t *testing.T) {
 	step := ci.FailedStep{ID: "id-2", Workflow: "CI", Job: "deploy", Step: "Run ./deploy.sh"}
 	checks := []config.Check{{Name: "lint", Run: "npm run lint"}}
-	got := Build(step, "abc", "boom\n", checks, knownSet(), DefaultLimits())
+	got := Build(ci.StepLog{Step: step, Commit: "abc", Log: "boom\n"}, checks, knownSet(), DefaultLimits())
 	if got.Fixable || got.Check != "" || got.Command != "" {
 		t.Fatalf("unmapped failure must not be fixable: %+v", got)
 	}
@@ -43,12 +43,35 @@ func TestBuildUnmapped(t *testing.T) {
 
 func TestBuildFilesComeFromTrimmedText(t *testing.T) {
 	log := "src/a.ts:1\n" + strings.Repeat("noise\n", 50) + "src/b.ts:2"
-	got := Build(ci.FailedStep{}, "c", log, nil, knownSet(), Limits{MaxLines: 5})
+	got := Build(ci.StepLog{Commit: "c", Log: log}, nil, knownSet(), Limits{MaxLines: 5})
 	if !got.Truncated {
 		t.Fatal("expected truncation")
 	}
 	if !reflect.DeepEqual(got.Files, []string{"src/b.ts"}) {
 		t.Fatalf("Files = %v, want only the file in the kept tail", got.Files)
+	}
+}
+
+func TestBuildPartialMarksTruncated(t *testing.T) {
+	tests := []struct {
+		name    string
+		sl      ci.StepLog
+		lim     Limits
+		want    bool
+		wantErr string
+	}{
+		{"complete, fits", ci.StepLog{Log: "boom"}, DefaultLimits(), false, "boom"},
+		{"partial, fits", ci.StepLog{Log: "boom", Partial: true}, DefaultLimits(), true, "boom"},
+		{"partial, empty", ci.StepLog{Partial: true}, DefaultLimits(), true, ""},
+		{"complete, trimmed", ci.StepLog{Log: "a\nb\nc"}, Limits{MaxLines: 1}, true, "[… 2 earlier lines trimmed …]\nc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Build(tc.sl, nil, knownSet(), tc.lim)
+			if got.Truncated != tc.want || got.Errors != tc.wantErr {
+				t.Fatalf("Truncated = %v, Errors = %q; want %v, %q", got.Truncated, got.Errors, tc.want, tc.wantErr)
+			}
+		})
 	}
 }
 

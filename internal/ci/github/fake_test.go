@@ -45,6 +45,9 @@ type fakeJob struct {
 	HTMLURL    string     `json:"html_url"`
 	Steps      []fakeStep `json:"steps"`
 	RunID      int64      `json:"run_id,omitempty"`
+
+	HeadSHA      string `json:"head_sha,omitempty"`
+	WorkflowName string `json:"workflow_name,omitempty"`
 }
 
 type fakeRequest struct {
@@ -75,6 +78,10 @@ type fakeGitHub struct {
 
 	// noLocation makes job log requests answer 302 without a Location.
 	noLocation bool
+
+	// emptyLocation makes job log requests answer 302 with an empty
+	// Location header.
+	emptyLocation bool
 
 	// slowHit receives a value whenever /slow is requested.
 	slowHit chan struct{}
@@ -213,9 +220,12 @@ func (f *fakeGitHub) serveJobLogs(w http.ResponseWriter, r *http.Request) {
 	if f.logLocation != "" {
 		loc = f.logLocation
 	}
-	noLocation := f.noLocation
+	noLocation, emptyLocation := f.noLocation, f.emptyLocation
 	f.mu.Unlock()
-	if !noLocation {
+	switch {
+	case emptyLocation:
+		w.Header()["Location"] = []string{""}
+	case !noLocation:
 		w.Header().Set("Location", loc)
 	}
 	w.WriteHeader(http.StatusFound)

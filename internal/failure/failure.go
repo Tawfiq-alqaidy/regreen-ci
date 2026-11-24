@@ -41,19 +41,24 @@ func DefaultLimits() Limits {
 	return Limits{MaxLines: 200, MaxBytes: 16384, MaxLineBytes: 2000, MaxFiles: 100}
 }
 
-// Build assembles a Failure. log is the provider's raw step log. Files are
+// Build assembles a Failure from a resolved step log. Step and commit come
+// from sl, which the provider rebuilt from its own records. Files are
 // extracted from the trimmed text, so a path that only appears in a dropped
-// part of the log does not widen the edit scope.
-func Build(step ci.FailedStep, commit, log string, checks []config.Check, known map[string]struct{}, lim Limits) Failure {
+// part of the log does not widen the edit scope. Truncated is also set when
+// the provider marked the log Partial.
+func Build(sl ci.StepLog, checks []config.Check, known map[string]struct{}, lim Limits) Failure {
+	step := sl.Step
 	f := Failure{
 		ID:       step.ID,
-		Commit:   commit,
+		Commit:   sl.Commit,
 		Workflow: step.Workflow,
 		Job:      step.Job,
 		Step:     step.Step,
 		URL:      step.URL,
 	}
-	f.Errors, f.Truncated = TrimLog(log, lim)
+	var trimmed bool
+	f.Errors, trimmed = TrimLog(sl.Log, lim)
+	f.Truncated = trimmed || sl.Partial
 	f.Files = ExtractFiles(f.Errors, known, lim.MaxFiles)
 	if c, ok := MatchCheck(step.Job, step.Step, checks); ok {
 		f.Check, f.Command, f.Fixable = c.Name, c.Run, true

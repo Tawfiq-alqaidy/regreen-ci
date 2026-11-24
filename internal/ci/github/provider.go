@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Tawfiq-alqaidy/regreen-ci/internal/ci"
@@ -42,8 +43,8 @@ func WithHTTPClient(c *http.Client) Option { return func(o *options) { o.httpCli
 // Provider is the GitHub Actions implementation of ci.Provider. The token
 // lives only inside the go-github client.
 type Provider struct {
-	client     *gogithub.Client
-	baseCustom bool // base URL was overridden; log fetching consults this
+	client    *gogithub.Client
+	allowHTTP bool // the base URL is an http test server; log downloads may be http too
 }
 
 // New returns a provider that authenticates with token.
@@ -70,7 +71,8 @@ func New(token string, opts ...Option) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub client: %w", err)
 	}
-	return &Provider{client: client, baseCustom: o.baseURL != ""}, nil
+	allowHTTP := o.baseURL != "" && strings.HasPrefix(client.BaseURL(), "http://")
+	return &Provider{client: client, allowHTTP: allowHTTP}, nil
 }
 
 // String keeps %v and %+v from printing anything but the provider's name.

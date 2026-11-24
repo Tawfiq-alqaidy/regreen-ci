@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Tawfiq-alqaidy/regreen-ci/internal/ci"
+	"github.com/Tawfiq-alqaidy/regreen-ci/internal/failure"
 )
 
 // TestLive talks to the real GitHub API. It never runs in CI: set
@@ -40,15 +41,18 @@ func TestLive(t *testing.T) {
 	}
 	t.Logf("status of %s: %s, %d failed step(s)", commit, st.Status, len(st.Failed))
 	for _, f := range st.Failed {
-		log, err := p.FailureLog(ctx, repo, f.ID)
+		sl, err := p.FailureLog(ctx, repo, f.ID)
 		if err != nil {
 			t.Errorf("%s: %v", f.ID, err)
 			continue
 		}
-		lines := strings.SplitAfter(log, "\n")
-		if len(lines) > 20 {
-			lines = lines[:20]
+		if f.Job != "" && sl.Commit != commit {
+			t.Errorf("%s: resolved to commit %q, want %q", f.ID, sl.Commit, commit)
 		}
-		t.Logf("%s (%s / %s / %s), first lines:\n%s", f.ID, f.Workflow, f.Job, f.Step, strings.Join(lines, ""))
+		// Log text is untrusted: sanitize and cap it, and print it quoted so
+		// nothing in it reaches the terminal as an escape sequence.
+		text, truncated := failure.TrimLog(sl.Log, failure.Limits{MaxLines: 20})
+		t.Logf("%q (%q / %q / %q), partial %v, truncated %v, last lines:\n%q",
+			f.ID, sl.Step.Workflow, sl.Step.Job, sl.Step.Step, sl.Partial, truncated, text)
 	}
 }
