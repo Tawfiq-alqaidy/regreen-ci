@@ -238,3 +238,91 @@ Each entry records what was decided, the alternatives, and why. Newest entries g
 - **Alternatives:** Extract `ErrorFiles` from the latest CI log on every attempt.
 - **Why:** Under `edit_scope: files_in_errors`, `ErrorFiles` is the only input that adds files the agent may edit; the rules (read from the base branch in M4) and the diff cannot. From the second attempt on, the CI log comes from a run of the agent's own pushed commit, so the agent can influence which files the log names (for example by adding a file whose name, or whose errors, then appear in the log) and so widen its own scope.
 - **Cost if wrong:** Taking the names only from the first failure means a second attempt cannot fix an error the first attempt revealed in another file; that needs a human or a new run.
+
+## D31. go-github v93.0.0 is the GitHub client
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** `internal/ci/github` uses `github.com/google/go-github/v93` at exactly v93.0.0 for the Actions API (list runs, list jobs, get a job, ask for a job log location). It is the only new direct dependency. It brings one indirect dependency, `github.com/google/go-querystring` v1.2.0, which go-github uses to build query strings. The client is built with `github.NewClient(opts...)` and the options `WithAuthToken`, `WithUserAgent`, `WithTimeout`, and, for tests only, `WithURLs` and `WithHTTPClient`.
+- **Alternatives:** Call the REST API with `net/http` and decode JSON into our own structs.
+- **Why:** The library already has the request paths, the query parameters, the response types and the pagination fields, and the maintainers of GitHub's own client keep them current. Raw `net/http` would mean writing and testing those ourselves, and a typo in a path or a field name would only show up against the real API. The library also refuses to follow a redirect to another host while the token is attached (`checkRedirectHost` in its source), and the adapter downloads the log with a separate client that has no token (D37; a test checks that the download request carries no `Authorization` header). The cost is the dependency, and a signature change when the major version moves; the version is pinned in `go.mod`, and the code was written against signatures read with `go doc`, not from memory.
+- **Cost if wrong:** If the library is abandoned or changes shape, the adapter is one package (`internal/ci/github`) and the rest of regreen sees only `ci.Provider`, so replacing the client touches that package alone.
+
+## D32. The provider interface is `ci.Provider`
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** The interface the brief calls `CIProvider` is named `ci.Provider`. It has three methods: `Name() string`, `CommitStatus(ctx, repo, commit) (CommitStatus, error)` and `FailureLog(ctx, repo, id) (string, error)`. The package `internal/ci` holds only provider-neutral types and does no I/O; a test (`TestCIPackageIsPure`) keeps `os`, `os/exec`, `net` and `net/http` out of it.
+- **Alternatives:** Keep the brief's name `ci.CIProvider`.
+- **Why:** Go style avoids repeating the package name in a type name (`ci.CIProvider` reads "ci CI provider"). The role is the same. `CommitStatus` reports the aggregate state and the failed steps; `FailureLog` turns one failed step's ID into raw log text, so the caller needs nothing but the ID from the first call to make the second.
+- **Cost if wrong:** A rename. Nothing outside the repository refers to the name yet.
+
+## D33. Failure IDs are stateless: `gha-<run>-<job>-<step>`
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** A failed step's ID is `gha-<runID>-<jobID>-<stepNumber>`, for example `gha-100-200-3`. The step number is 0 when the job failed without a failed step, and the job ID is 0 when the run failed without any failed job (such an ID has no log: `FailureLog` returns an empty string for it). `parseID` accepts only that exact shape (decimal digits, run ID above 0, fixed length limits) and nothing else, because IDs come from callers. The job fetched for an ID must belong to the run the ID names, or `FailureLog` fails.
+- **Alternatives:** Random IDs with a lookup table in a state file; an opaque encoded string.
+- **Why:** The same failure gets the same ID on every call and in every process, so M3's `get_failure` needs no state to resolve an ID, and a test can write the ID down by hand. Nothing secret is in it. The cost of being readable is that a caller can construct an ID; this is harmless because `FailureLog` re-reads everything from GitHub, uses the caller's token, and checks that run and job agree.
+- **Cost if wrong:** If another provider needs a different shape, it picks its own prefix; callers treat the ID as opaque (`ci.FailedStep.ID` says so).
+
+## D34. Which runs count, and when the status is final
+
+- **Date:** 2026-11-24 (M2; changed during review)
+- **Decision:** `CommitStatus` lists the workflow runs whose `head_sha` equals the commit, whatever the event (`push`, `pull_request`, and so on). The status is `pending` if any of those runs is not `completed`, including a run that a newer run has replaced. If every run is completed, runs are grouped by (workflow, event, head branch) and only the newest of each group counts, by run number and then attempt, so a re-run replaces the run it re-ran and a newer push replaces an older one. No runs at all is `no_runs`. A listing that GitHub reports as larger than what arrived (`total_count` above the number received), or more than 10 pages of 100, is an error, not a guess. The same holds for the job list of a run.
+- **Alternatives:** Count only the newest run per workflow and event (the plan's first version, which also decided pending from the kept runs only); count only `push` runs; decide from the first page.
+- **Why:** The maintainer's rule is that status stays `pending` until every run for the commit has completed, so pending is decided over all of them. The branch is part of the group key because one commit can be the head of two branches (a push and a pull request from another branch); a passing run on one must not hide a failing run on the other. Partial data is refused because a missing page could be the failing run.
+- **Cost if wrong:** A stale run that nothing replaces (say, on a branch nobody pushes to again) keeps the commit `pending` or `failure` until it is re-run or deleted. A commit with more than 1000 runs cannot be judged and returns an error.
+
+## D35. Conclusions are mapped fail closed
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** A completed run or job passes only if its conclusion is `success`, `skipped` or `neutral`. Every other completed value (`failure`, `timed_out`, `cancelled`, `startup_failure`, `action_required`, `stale`, and any value GitHub adds later) counts as failing. For a failing run, each completed non-passing job yields one `ci.FailedStep` per step whose conclusion is `failure`. A failing job with no such step (cancelled, timed out, runner lost) yields one entry with an empty step name and step number 0, and a failing run with no failing job yields one entry with an empty job name. So a `failure` status always carries at least one failed step. Failed steps are listed run by run in ascending run ID order.
+- **Alternatives:** List the known failing values and treat the rest as passing; skip jobs with no failed step.
+- **Why:** An unknown value that counts as passing could report a broken commit as green. A cancelled job with no step to name is still a reason the commit is not green, so it still gets an entry the caller can show.
+- **Cost if wrong:** A value GitHub adds that is harmless is reported as a failure until the list in `passes` learns it. A `cancelled` run, which a person may have cancelled on purpose, is reported as failing.
+
+## D36. A step's log is cut out of the job log by timestamp window
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** GitHub gives one log per job, not per step. `FailureLog` takes the failed step's start and end time from the job's step list and keeps the log lines whose leading RFC 3339 timestamp is at or after the start and before the end plus one second. The API reports step times truncated to the second, so the extra second keeps the step's last lines. A line with no timestamp belongs with the line before it. If the step has no usable times, is not in the job, or the window selects nothing, the whole job log is returned. Then GitHub's per-line timestamps and its workflow markers are stripped (`##[group]`, `##[command]`, `[command]` and `##[debug]` removed; `##[error]`, `##[warning]` and `##[notice]` turned into `error: `, `warning: ` and `notice: `; `##[endgroup]` lines dropped).
+- **Alternatives:** Download the run-logs zip archive, which has one file per step, and read the step's file.
+- **Why:** The archive is a zip from an untrusted source: reading it means a zip parser, limits on entry count and expanded size, and file names that come from the log host. The job log is plain text we can cap while we read it. Its cost is precision, and a longer excerpt is better than none.
+- **Cost if wrong:** Steps that run within the same second can bleed into each other, so an excerpt can include a neighbouring fast step's lines. A composite action or a reusable workflow is one step to GitHub, so a failure inside it is reported as the calling step. A byte-order mark at the start of a log and a log with no timestamps are handled (fixtures cover both). Windows line endings are not handled by `stripFraming`: a trailing `\r` stays on the line, so a line that is only `##[endgroup]` is not recognised and is kept (the later `TrimLog` turns the `\r` into a line break, leaving a stray `##[endgroup]` line in the excerpt).
+
+## D37. The log is downloaded without the token, and only its tail is kept
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** `FailureLog` asks the API for the job's log location (a signed URL), then downloads it with a separate `http.Client` that has no credentials. The URL must have a host and be `https` (`http` only when a test overrides the API base URL to an `http` server); the same check runs on each redirect, with at most two redirects. At most 8 MiB is kept, and when the log is bigger the end is kept, starting at a line boundary, because a step reports its failure at the end. The reader never holds much more than twice the cap. Errors name the job, the repository and at most the HTTP status. They never contain the signed URL or the token, and an error from go-github for the location request is not wrapped, since it can carry the URL. A cancelled context returns the context's error.
+- **Alternatives:** Download through the API client; read the whole body; keep the head of a large log.
+- **Why:** The signed URL is a secret that grants access to the log, and the log host is not the API host, so the API token has no business there. Bounding the read means a huge or endless response cannot use all memory.
+- **Cost if wrong:** A failure early in a log larger than 8 MiB is not seen. There are no retries and no rate-limit handling: a 403 or 429 is an error with its status.
+
+## D38. Token lookup: `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh`; github.com only
+
+- **Date:** 2026-11-24 (M2)
+- **Decision:** `Token(ctx)` returns the first of: the `GH_TOKEN` variable, the `GITHUB_TOKEN` variable, the output of `gh auth token --hostname github.com` (run with a 10 second limit, fixed arguments, and the binary found by `exec.LookPath`). A value with whitespace or control characters in it is an error. If nothing is found the error is `ErrNoToken`. A cancelled or timed-out lookup returns the context error, not `ErrNoToken`. The token is never logged or written to disk, and `Provider` prints as `github-actions provider` whatever formatting verb is used. Only the host `github.com` is accepted; any other host in `ci.Repo` is an error.
+- **Alternatives:** Read only the environment; support GitHub Enterprise hosts now.
+- **Why:** The two variables are what GitHub's own tools use, and `gh` covers a developer who is logged in but exports nothing. Enterprise hosts need their own API base URL and their own token lookup, and none of that has been asked for; refusing the host clearly is better than sending a github.com token to another host.
+- **Cost if wrong:** GitHub Enterprise users cannot use regreen until a later milestone adds host-specific URLs and `gh auth token --hostname <host>`.
+
+## D39. A failed step is mapped to a check by name or command
+
+- **Date:** 2026-11-24 (M2; maintainer decision 1)
+- **Decision:** `MatchCheck` maps a failed step to a `regreen.yml` check without any config change. It tries three levels and the first that finds exactly one check wins. (1) The step's command equals a check's `run`, or the step's name equals a check's `name` (ignoring case). The step's command is its name without a leading `Run ` (GitHub's default name for a `run:` step). (2) The command contains a check's `run` at word boundaries; if several checks match, the longest `run` wins. (3) The job name equals a check's name. Whitespace is collapsed before comparing. If a level finds several different checks, the result is ambiguous and the step is unmatched, with no fallback to a later level. An unmatched step is `Fixable == false`.
+- **Alternatives:** Add a `workflow`/`job` key to each check in `regreen.yml`; match by substring anywhere.
+- **Why:** The maintainer chose to match on what is already in the config. Word boundaries stop `npm test` from matching `npm testing`. Failing closed on ambiguity means regreen never picks a fix command by a coin toss.
+- **Cost if wrong:** A step whose name has nothing in common with its check is not fixable by regreen; the user renames the step or the check. Level 3 can match an unrelated step in a job that is named like a check.
+
+## D40. Error files are the log's path tokens that are known files (resolves D30 in part)
+
+- **Date:** 2026-11-24 (M2; maintainer decision 2)
+- **Decision:** `ExtractFiles(text, known, maxFiles)` returns the entries of the caller's `known` set that appear as tokens in the trimmed log text, sorted, unique, at most 100 (the default). Tokens are split on whitespace and on `" ' ` ( ) [ ] { } < > , ; = |`. A trailing `:12`, `:12:5`, `:` or `.` and a leading `./` are removed, and backslashes become `/`. A token matches if it equals a known path, or if it is an absolute path (a leading `/` or a drive letter) that ends with `/` and a known path. Any token with a `..` segment is ignored. A token over 4096 bytes is ignored. The last token of a line that carries the cut marker is ignored too, since it may be half of a longer name. The file system is never read. `failure.Build` extracts files from the trimmed excerpt, not from the raw log, so a path that only appears in a part that was cut does not count.
+- **Alternatives:** Treat every path-like token as a file (even one not in the repository); read the file system to check existence.
+- **Why:** `ErrorFiles` is the one input that can widen what the agent may edit (D30). Taking only names the caller already knows keeps a log from naming a new path, and a pure function with a set argument is easy to test. Names with spaces are not extracted, because a space splits a token.
+- **Cost if wrong:** Files whose names contain spaces are never in the list, so `files_in_errors` cannot allow them. **What M3 must still do for D30:** the set `known` must come from git at the original failing commit (or the base), never from the agent's later push, and `Build` must be called on the log of the original failure for the files, not on a later run's log. M2 gives M3 the function and the parameter; it cannot enforce where M3 gets the set. Even with a correct set, a log can name any known file, so this bounds the widening to existing files of the base; it does not make log text trustworthy.
+
+## D41. What `TrimLog` does to untrusted log text
+
+- **Date:** 2026-11-24 (M2; extended in review)
+- **Decision:** `TrimLog` is applied to every excerpt. In order: (1) invalid UTF-8 becomes U+FFFD; (2) `\r\n` and `\r` become `\n`, and U+2028, U+2029 and U+0085 (NEL) become `\n` too, so a Unicode line separator cannot forge a line break; (3) ANSI escape sequences are removed (CSI, `ESC [` up to its final byte, and OSC, `ESC ]` up to BEL or `ESC \`; one not ended on its line stops at the newline, so it cannot swallow the rest of the log), then all other control characters except newline and tab, and every Unicode format character (category Cf: bidirectional overrides and isolates, zero-width characters, tags, soft hyphen); (4) trailing blanks are trimmed, three or more blank lines collapse to two, and leading and trailing blank lines are dropped; (5) a line longer than `MaxLineBytes` is cut at a rune boundary and ends with ` …[line cut]`; (6) the last lines that fit `MaxLines` and `MaxBytes` are kept, and if earlier lines were dropped the text starts with `[… N earlier lines trimmed …]`. Defaults: 200 lines, 16384 bytes, 2000 bytes per line. A limit that is not positive takes its default. Every cut inside a line carries the marker: `MaxLineBytes` is lowered to `MaxBytes` minus the marker if needed, and `MaxBytes` has a floor of the marker plus one rune (18 bytes), so there is no unmarked cut.
+- **Alternatives:** Only strip ANSI; escape instead of delete; keep format characters.
+- **Why:** The excerpt is shown to a person and to an agent. Bidirectional overrides make text read differently from how it is stored, zero-width and tag characters hide text, and a fake line separator forges structure; all of those are ways to make a log say something else to the reader. Deleting them is simpler to reason about than escaping.
+- **Cost if wrong:** Emoji sequences joined by a zero-width joiner and soft hyphens lose a character. A `MaxBytes` below 18 is not honoured exactly. The kept tail is not guaranteed to be a fixpoint of `TrimLog` in every case (blank lines after the header line), only to be safe to trim again. None of this makes the text trustworthy: a log can still say anything in plain words, so the excerpt must be shown as data (see the trust model in `ARCHITECTURE.md`).
